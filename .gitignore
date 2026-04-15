@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.streamlit/
+efa_club_data.json
+efa_change_log.json
+efa_comments.json
+EFA_Club_Full_Report.xlsx
