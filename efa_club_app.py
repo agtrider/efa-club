@@ -17,6 +17,48 @@ except ImportError:
 
 st.set_page_config(page_title="EFA Investment Club", layout="wide", page_icon="🔥")
 
+# ====================== MEMBER LOGIN SYSTEM ======================
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
+    st.session_state.username = None
+    st.session_state.is_admin = False
+
+MEMBER_CREDENTIALS = {
+    "Antonio Calderon": {"email": "acal721@gmail.com", "password": "EFAIC2026001CA"},
+    "Chris Koo": {"email": "Chris.b.koo@outlook.com", "password": "EFAIC2026002KC"},
+    "Josh Tafoya": {"email": "Joshtafoya01@gmail.com", "password": "EFAIC2026003TJ"},
+    "Jeff Gragert": {"email": "Jagragert@gmail.com", "password": "EFAIC2026004GJ"},
+    "Nick Vigil": {"email": "Nbvigil24@hotmail.com", "password": "EFAIC2026005VN"},
+    "Ray Gilkes": {"email": "Bison1867@gmail.com", "password": "EFAIC2026006GR"},
+    "Jose Calderon": {"email": "Josecalderon036@gmail.com", "password": "EFAIC2026007CJ"},
+    "Chad Speegle": {"email": "Chad.speegle@gmail.com", "password": "EFAIC2026008SC"},
+    "Jaydn Tafoya": {"email": "Jadynty21@gmail.com", "password": "EFAIC2026009TJ"},
+    "Matt Newbill": {"email": "Matthew.Newbill@gmail.com", "password": "EFAIC20260010NM"},
+    "Mike Brooks": {"email": "Mikeb1120@gmail.com", "password": "EFAIC20260011BM"}
+}
+
+def login_page():
+    st.title("🔥 EFA Investment Club")
+    st.subheader("Member Login")
+    username = st.selectbox("Select your name", options=list(MEMBER_CREDENTIALS.keys()))
+    email_input = st.text_input("Email (Login ID)", value=MEMBER_CREDENTIALS[username]["email"], disabled=True)
+    password = st.text_input("Password", type="password")
+    
+    if st.button("Login", type="primary"):
+        if password == MEMBER_CREDENTIALS[username]["password"]:
+            st.session_state.logged_in = True
+            st.session_state.username = username
+            st.session_state.is_admin = (username == "Antonio Calderon")
+            st.success(f"✅ Welcome back, {username}!")
+            st.rerun()
+        else:
+            st.error("❌ Incorrect password.")
+
+if not st.session_state.logged_in:
+    login_page()
+    st.stop()
+
+# ====================== MAIN APP ======================
 st.markdown("""
     <style>
     body { font-size: 1.1em; }
@@ -40,18 +82,15 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-st.title("🔥 EFA Investment Club")
-st.caption("Equity For All • Accurate Deposit History + Live Portfolio Tracking • April 2026")
+st.title(f"🔥 EFA Investment Club - Welcome, {st.session_state.username}")
+if st.session_state.is_admin:
+    st.caption("👑 Admin Mode")
 
-# ====================== BIBLE BOX ======================
 st.markdown("""
 <div class="bible-box">
     <h3>🙌 Building Together</h3>
     <p><strong>2 Corinthians 9:6-8 (NIV)</strong></p>
-    <p>“Remember this: Whoever sows sparingly will also reap sparingly, and whoever sows generously will also reap generously.
-    Each of you should give what you have decided in your heart to give, not reluctantly or under compulsion,
-    for God loves a cheerful giver. And God is able to bless you abundantly, so that in all things at all times,
-    having all that you need, you will abound in every good work.”</p>
+    <p>“Remember this: Whoever sows sparingly will also reap sparingly...</p>
     <p style="font-size: 0.95em; opacity: 0.9;">Planting seeds as a family • Growing abundance to share with the world</p>
 </div>
 """, unsafe_allow_html=True)
@@ -62,21 +101,9 @@ def load_members():
         response = supabase.table("club_data").select("*").eq("id", 1).execute()
         if response.data and len(response.data) > 0:
             return response.data[0]["data"].get("members", [])
-    except Exception as e:
-        st.warning(f"Members load failed: {e}")
-    return [
-        {"name": "Matt Newbill", "total_contributed": 0.0},
-        {"name": "Nick Vigil", "total_contributed": 0.0},
-        {"name": "Mike Brooks", "total_contributed": 0.0},
-        {"name": "Jose Calderon", "total_contributed": 0.0},
-        {"name": "Jeff Gragert", "total_contributed": 0.0},
-        {"name": "Ray Gilkes", "total_contributed": 0.0},
-        {"name": "Antonio Calderon", "total_contributed": 0.0},
-        {"name": "Josh Tafoya", "total_contributed": 0.0},
-        {"name": "Jaydn Tafoya", "total_contributed": 0.0},
-        {"name": "Chad Speegle", "total_contributed": 0.0},
-        {"name": "Chris Koo", "total_contributed": 0.0}
-    ]
+    except:
+        pass
+    return [{"name": name, "total_contributed": 0.0} for name in MEMBER_CREDENTIALS.keys()]
 
 def load_transactions():
     try:
@@ -102,25 +129,12 @@ def save_transactions(transactions_list):
     except Exception as e:
         st.error(f"Transaction save failed: {e}")
 
-def load_change_log():
-    try:
-        response = supabase.table("change_log").select("*").eq("id", 1).execute()
-        return response.data[0]["data"] if response.data else []
-    except:
-        return []
-
 def load_comments():
     try:
         response = supabase.table("comments").select("*").eq("id", 1).execute()
         return response.data[0]["data"] if response.data else []
     except:
         return []
-
-def save_change_log(change_log_list):
-    try:
-        supabase.table("change_log").upsert({"id": 1, "data": change_log_list}).execute()
-    except:
-        pass
 
 def save_comments(comments_list):
     try:
@@ -132,9 +146,7 @@ def save_comments(comments_list):
 members = load_members()
 transactions = load_transactions()
 
-# Make the $250 seed PERMANENT – it will always be re-added if missing (even after Replace All)
-seed_exists = any(t.get("type") == "Opening Deposit" for t in transactions)
-if not seed_exists:
+if not any(t.get("type") == "Opening Deposit" for t in transactions):
     members_list = [m["name"] for m in members]
     seed_alloc = {name: 25.0 if name != "Ray Gilkes" else 0.0 for name in members_list}
     seed_txn = {
@@ -145,47 +157,71 @@ if not seed_exists:
         "price": 0,
         "amount": 250.0,
         "commission": 0,
-        "notes": "Initial account opening deposit (PROTECTED – never deleted by Replace All)",
+        "notes": "Initial $250 opening deposit (PROTECTED)",
         "allocations": seed_alloc
     }
     supabase.table("transactions").insert(seed_txn).execute()
     transactions = load_transactions()
-
-    # Force sync member total_contributed with seed
     for m in members:
         m["total_contributed"] = seed_alloc.get(m["name"], 0.0)
     save_members(members)
 
-    st.success("✅ $250 seed deposit is now permanent and protected")
-
 data = {"members": members, "transactions": transactions}
 
-# ====================== AUTO-ALLOCATION ======================
+# ====================== ALLOCATION LOGIC ======================
 def auto_allocate_transactions():
     members_list = [m["name"] for m in data["members"]]
-    num_members = 11
     for txn in data["transactions"]:
         if not txn.get("allocations"):
             amount = float(txn.get("amount", 0))
-            if amount != 0:
-                txn_type = str(txn.get("type", "")).lower()
-                if txn_type == "deposit" and abs(amount) == 27500:
-                    txn["allocations"] = {
-                        "Matt Newbill": 5000.0, "Nick Vigil": 5000.0,
-                        "Mike Brooks": 2500.0, "Jose Calderon": 2500.0,
-                        "Jeff Gragert": 2500.0, "Ray Gilkes": 2500.0,
-                        "Josh Tafoya": 2500.0, "Jaydn Tafoya": 2500.0,
-                        "Chad Speegle": 2500.0,
-                        "Antonio Calderon": 0.0, "Chris Koo": 0.0
-                    }
-                else:
-                    positive_amount = abs(amount)
-                    default = positive_amount / num_members
-                    txn["allocations"] = {name: default for name in members_list}
+            if amount == 0:
+                continue
+            txn_type = str(txn.get("type", "")).lower()
+            txn_date_str = str(txn.get("date", "2026-04-15")).split(" ")[0]
+            try:
+                txn_date = datetime.strptime(txn_date_str, "%Y-%m-%d")
+            except:
+                txn_date = datetime(2026, 4, 15)
+
+            # Buys and Sells: ALWAYS 1/11 equal split from day one
+            if "buy" in txn_type or "sell" in txn_type:
+                default = abs(amount) / 11
+                txn["allocations"] = {name: default for name in members_list}
+                continue
+
+            # Deposits only use date-based rules
+            if txn_type == "opening deposit":
+                continue  # already allocated
+
+            # Pre 4/1/2026 deposits → 1/10 (exclude Ray)
+            if txn_date < datetime(2026, 4, 1):
+                alloc_amount = abs(amount) / 10
+                txn["allocations"] = {name: alloc_amount if name != "Ray Gilkes" else 0.0 for name in members_list}
+            
+            # 4/1/2026 – 4/14/2026 deposits → exact % from your table
+            elif datetime(2026, 4, 1) <= txn_date <= datetime(2026, 4, 14):
+                txn["allocations"] = {
+                    "Antonio Calderon": 0.0,
+                    "Chris Koo": 0.0,
+                    "Josh Tafoya": abs(amount) / 11,
+                    "Jeff Gragert": abs(amount) / 11,
+                    "Nick Vigil": abs(amount) * 2 / 11,
+                    "Ray Gilkes": abs(amount) / 11,
+                    "Jose Calderon": abs(amount) / 11,
+                    "Chad Speegle": abs(amount) / 11,
+                    "Jaydn Tafoya": abs(amount) / 11,
+                    "Matt Newbill": abs(amount) * 2 / 11,
+                    "Mike Brooks": abs(amount) / 11
+                }
+            
+            # On or after 4/15/2026 deposits → 1/11 equal
+            else:
+                default = abs(amount) / 11
+                txn["allocations"] = {name: default for name in members_list}
 
 auto_allocate_transactions()
 
-# ====================== DYNAMIC TOTALS (seed is now always included) ======================
+# ====================== DYNAMIC TOTALS ======================
 def calculate_dynamic_totals():
     df_txn = pd.DataFrame(data["transactions"])
     member_totals = {m["name"]: {"invested": 0.0, "fees": 0.0, "contributed": 0.0} for m in data["members"]}
@@ -198,7 +234,7 @@ def calculate_dynamic_totals():
 
         is_stock_buy = "buy" in txn_type and ticker not in ["CASH", ""]
         is_stock_sell = "sell" in txn_type
-        is_deposit = "deposit" in txn_type or "opening deposit" in txn_type
+        is_deposit = "deposit" in txn_type or "opening" in txn_type or "early" in txn_type
         is_withdrawal = "withdrawal" in txn_type
 
         for member_name, alloc_amount in alloc.items():
@@ -225,7 +261,7 @@ for m in data["members"]:
     m["fees"] = dynamic_totals.get(name, {}).get("fees", 0.0)
     m["total_contributed"] = dynamic_totals.get(name, {}).get("contributed", m.get("total_contributed", 0.0))
 
-save_members(data["members"])  # Keep members in sync with seed + transactions
+save_members(data["members"])
 
 # ====================== HOLDINGS & PRICES ======================
 df_txn = pd.DataFrame(data["transactions"])
@@ -253,7 +289,7 @@ negative_members = [m["name"] for m in data["members"] if (m.get("total_contribu
 if negative_members:
     st.error(f"⚠️ **NEGATIVE BALANCE ALERT**: {', '.join(negative_members)} ha{'s' if len(negative_members)==1 else 've'} gone negative.")
 
-# ====================== SIDEBAR - STRICT TWO-STEP CSV UPLOAD ======================
+# ====================== SIDEBAR UPLOAD ======================
 st.sidebar.header("📤 CSV Upload (IBKR)")
 uploaded_file = st.sidebar.file_uploader("Upload new IBKR Transactions CSV", type=["csv"])
 
@@ -261,13 +297,9 @@ if uploaded_file is not None:
     try:
         text = uploaded_file.getvalue().decode('utf-8')
         lines = text.splitlines()
-        header_index = None
-        for i, line in enumerate(lines):
-            if "Transaction Type" in line and "Symbol" in line:
-                header_index = i
-                break
+        header_index = next((i for i, line in enumerate(lines) if "Transaction Type" in line and "Symbol" in line), None)
         if header_index is None:
-            st.sidebar.error("Could not find transaction header in CSV.")
+            st.sidebar.error("Could not find transaction header.")
         else:
             df_pending = pd.read_csv(uploaded_file, skiprows=header_index)
             numeric_cols = ['Quantity', 'Price', 'Gross Amount', 'Commission', 'Net Amount']
@@ -276,14 +308,12 @@ if uploaded_file is not None:
                     df_pending[col] = pd.to_numeric(df_pending[col], errors='coerce').fillna(0)
             st.session_state.pending_df = df_pending
             st.sidebar.success(f"Preview ready – {len(df_pending)} transactions loaded")
-            st.sidebar.info("Click Append or Replace below to commit")
     except Exception as e:
         st.sidebar.error(f"Error reading CSV: {e}")
 
 if "pending_df" in st.session_state:
     col1, col2 = st.sidebar.columns(2)
     if col1.button("Append to Existing Data"):
-        added_count = len(st.session_state.pending_df)
         new_txns = []
         for _, row in st.session_state.pending_df.iterrows():
             new_txns.append({
@@ -303,7 +333,7 @@ if "pending_df" in st.session_state:
         save_members(data["members"])
         data["transactions"] = load_transactions()
         auto_allocate_transactions()
-        st.sidebar.success(f"✅ Appended {added_count} transactions! Total now: {len(data['transactions'])}")
+        st.sidebar.success(f"✅ Appended! Total transactions: {len(data['transactions'])}")
         del st.session_state.pending_df
         st.rerun()
 
@@ -321,7 +351,6 @@ if "pending_df" in st.session_state:
                 "notes": str(row.get("Description", "")),
                 "allocations": {}
             })
-        # Re-insert protected seed so it is never lost on Replace All
         seed_txns = [t for t in data["transactions"] if t.get("type") == "Opening Deposit"]
         data["transactions"] = seed_txns + new_txns
         auto_allocate_transactions()
@@ -337,7 +366,7 @@ if st.sidebar.button("🔄 Refresh Data from Supabase"):
     data["members"] = load_members()
     data["transactions"] = load_transactions()
     auto_allocate_transactions()
-    st.success("✅ Data refreshed from Supabase")
+    st.success("✅ Data refreshed")
     st.rerun()
 
 # ====================== TABS ======================
@@ -519,7 +548,7 @@ with tab3:
     })
     st.dataframe(pd.DataFrame(perf_rows), width="stretch", hide_index=True)
 
-# TAB 4: Transaction History (Master Table with two extra total rows)
+# TAB 4: Transaction History
 with tab4:
     st.subheader("Transaction History (Master Table)")
     txn_df = pd.DataFrame(data["transactions"])
@@ -543,10 +572,9 @@ with tab4:
         total_row["ticker"] = ""
         txn_df_display = pd.concat([txn_df_display, pd.DataFrame([total_row])], ignore_index=True)
 
-        # Extra total rows
         stock_buys = txn_df[txn_df.get("type", "").str.contains("Buy", na=False)]
         stock_sells = txn_df[txn_df.get("type", "").str.contains("Sell", na=False)]
-        deposits = txn_df[txn_df.get("type", "").str.contains("Deposit|Opening Deposit", na=False)]
+        deposits = txn_df[txn_df.get("type", "").str.contains("Deposit|Opening Deposit|Early Deposit", na=False)]
         withdrawals = txn_df[txn_df.get("type", "").str.contains("Withdrawal", na=False)]
 
         total_invested = stock_buys["amount"].sum() - stock_sells["amount"].sum()
@@ -561,4 +589,8 @@ with tab4:
     else:
         st.info("No transactions yet.")
 
-st.caption("✅ $250 seed is now PERMANENT and protected from Replace All • Transaction History is the single source of truth • Strict 2-step upload")
+if st.sidebar.button("Logout"):
+    st.session_state.logged_in = False
+    st.rerun()
+
+st.caption("✅ Deposits use date-based rules • Buys & Sells always 1/11 • $250 seed protected")
