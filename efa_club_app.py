@@ -78,7 +78,7 @@ st.markdown("""
         margin-bottom: 25px;
         border-left: 6px solid #9370DB;
         box-shadow: 0 4px 12px rgba(0,0,0,0.3);
-        max-width: 55%;
+        max-width: 70%;   /* Made wider as requested */
     }
     .portfolio-summary {
         background-color: #1e1e1e;
@@ -247,7 +247,7 @@ for m in data["members"]:
 
 save_members(data["members"])
 
-# ====================== HOLDINGS ======================
+# ====================== HOLDINGS & LIVE PRICES ======================
 df_txn = pd.DataFrame(data["transactions"])
 buys = df_txn[df_txn.get("type", pd.Series([])).str.contains("Buy", na=False)]
 holdings = defaultdict(lambda: {"qty": 0.0, "cost_basis": 0.0})
@@ -259,8 +259,7 @@ for _, row in buys.iterrows():
     holdings[ticker]["qty"] += qty
     holdings[ticker]["cost_basis"] += cost
 
-# ====================== ROBUST PRICE FETCHING ======================
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=60)
 def get_price(ticker):
     try:
         stock = yf.Ticker(ticker)
@@ -276,7 +275,7 @@ def get_price(ticker):
 
 prices = {ticker: get_price(ticker) for ticker in holdings}
 
-# ====================== PORTFOLIO SUMMARY CALCULATIONS (MATCHING CLUB HOLDINGS) ======================
+# ====================== PORTFOLIO SUMMARY CALCULATIONS ======================
 total_market_value = sum(h["qty"] * prices.get(t, 0) for t, h in holdings.items())
 total_cost_basis = sum(h["cost_basis"] for h in holdings.values())
 overall_return = ((total_market_value / total_cost_basis) - 1) * 100 if total_cost_basis > 0 else 0
@@ -290,8 +289,7 @@ with col_bible:
     <div class="bible-box">
         <h3>🙌 Building Together</h3>
         <p><strong>2 Corinthians 9:6-8 (NIV)</strong></p>
-        <p>“Remember this: Whoever sows sparingly will also reap sparingly, and whoever sows generously will also reap generously...
-        for God loves a cheerful giver.”</p>
+        <p>“Remember this: Whoever sows sparingly will also reap sparingly, and whoever sows generously will also reap generously... for God loves a cheerful giver.”</p>
         <p style="font-size: 0.95em; opacity: 0.9;">Planting seeds as a family • Growing abundance to share with the world</p>
     </div>
     """, unsafe_allow_html=True)
@@ -559,9 +557,6 @@ with tab2:
 
     if total_market == 0:
         st.warning("⚠️ Live prices are currently showing $0.00. This can happen during non-trading hours or temporary yfinance delays. Prices usually update within a few minutes during market hours.")
-
-# TAB 3 & TAB 4 remain the same as your last working version
-# (I kept them exactly as you had them to avoid breaking anything)
 
 # TAB 3: Member Performance
 with tab3:
