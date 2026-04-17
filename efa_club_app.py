@@ -247,7 +247,7 @@ for m in data["members"]:
 
 save_members(data["members"])
 
-# ====================== HOLDINGS & PRICES ======================
+# ====================== HOLDINGS ======================
 df_txn = pd.DataFrame(data["transactions"])
 buys = df_txn[df_txn.get("type", pd.Series([])).str.contains("Buy", na=False)]
 holdings = defaultdict(lambda: {"qty": 0.0, "cost_basis": 0.0})
@@ -259,23 +259,31 @@ for _, row in buys.iterrows():
     holdings[ticker]["qty"] += qty
     holdings[ticker]["cost_basis"] += cost
 
-@st.cache_data(ttl=60)
+# ====================== ROBUST PRICE FETCHING ======================
+@st.cache_data(ttl=60, show_spinner=False)
 def get_price(ticker):
     try:
+        # Primary: yf.download (most reliable on Streamlit Cloud)
+        df = yf.download(ticker, period="5d", progress=False)
+        if not df.empty:
+            price = float(df["Close"].iloc[-1])
+            if price > 0:
+                return price
+
+        # Fallback: Ticker.info
         stock = yf.Ticker(ticker)
         info = stock.info
         price = info.get("currentPrice") or info.get("regularMarketPreviousClose") or info.get("previousClose") or 0
-        if price == 0 or price is None:
-            hist = stock.history(period="5d")
-            if not hist.empty:
-                price = hist["Close"].iloc[-1]
-        return float(price) if price is not None else 0.0
+        if price > 0:
+            return float(price)
+
+        return 0.0
     except:
         return 0.0
 
 prices = {ticker: get_price(ticker) for ticker in holdings}
 
-# Portfolio calculations for summary box
+# ====================== PORTFOLIO SUMMARY CALCULATIONS ======================
 total_market_value = sum(h["qty"] * prices.get(t, 0) for t, h in holdings.items())
 total_cost_basis = sum(h["cost_basis"] for h in holdings.values())
 overall_return = ((total_market_value / total_cost_basis) - 1) * 100 if total_cost_basis > 0 else 0
@@ -310,7 +318,7 @@ negative_members = [m["name"] for m in data["members"] if (m.get("total_contribu
 if negative_members:
     st.error(f"⚠️ **NEGATIVE BALANCE ALERT**: {', '.join(negative_members)} ha{'s' if len(negative_members)==1 else 've'} gone negative.")
 
-# ====================== SIDEBAR UPLOAD ======================
+# ====================== SIDEBAR ======================
 st.sidebar.header("📤 CSV Upload (IBKR)")
 uploaded_file = st.sidebar.file_uploader("Upload new IBKR Transactions CSV", type=["csv"])
 
@@ -388,6 +396,12 @@ if st.sidebar.button("🔄 Refresh Data from Supabase"):
     data["transactions"] = load_transactions()
     auto_allocate_transactions()
     st.success("✅ Data refreshed")
+    st.rerun()
+
+# NEW: Force Refresh Prices button
+if st.sidebar.button("🔄 Force Refresh Prices"):
+    get_price.clear()
+    st.success("✅ Prices cache cleared — refreshing now")
     st.rerun()
 
 # ====================== TABS ======================
@@ -489,7 +503,7 @@ with tab1:
 with tab2:
     st.subheader("Club Holdings with Live Prices")
    
-    @st.cache_data(ttl=60)  # Short cache - refresh every 60 seconds
+    @st.cache_data(ttl=60)
     def get_price(ticker):
         try:
             stock = yf.Ticker(ticker)
@@ -546,7 +560,6 @@ with tab2:
         total_cost += cost_basis
         total_market += market_value
         total_unrealized += unrealized
-
     total_pct_return = ((total_market / total_cost) - 1) * 100 if total_cost > 0 else 0
     rows.append({
         "Ticker": "**TOTAL**",
@@ -559,7 +572,6 @@ with tab2:
         "% Return": f"{total_pct_return:.2f}%"
     })
     st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
-
     if total_market == 0 or all(p == 0 for p in prices.values()):
         st.warning("⚠️ Live prices are currently showing $0.00. This can happen during non-trading hours or temporary yfinance delays. Prices usually update within a few minutes during market hours. The previous close is used as fallback when available.")
 
