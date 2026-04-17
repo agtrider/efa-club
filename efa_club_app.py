@@ -247,7 +247,7 @@ for m in data["members"]:
 
 save_members(data["members"])
 
-# ====================== HOLDINGS & LIVE PRICES (IMPROVED) ======================
+# ====================== HOLDINGS & LIVE PRICES (ROBUST) ======================
 df_txn = pd.DataFrame(data["transactions"])
 buys = df_txn[df_txn.get("type", pd.Series([])).str.contains("Buy", na=False)]
 holdings = defaultdict(lambda: {"qty": 0.0, "cost_basis": 0.0})
@@ -264,18 +264,20 @@ def get_price(ticker):
     try:
         stock = yf.Ticker(ticker)
         info = stock.info
-        price = info.get("currentPrice") or info.get("regularMarketPreviousClose") or info.get("previousClose") or 0
+        price = (info.get("currentPrice") or 
+                 info.get("regularMarketPreviousClose") or 
+                 info.get("previousClose") or 0)
         if price == 0 or price is None:
             hist = stock.history(period="5d")
             if not hist.empty:
                 price = hist["Close"].iloc[-1]
-        return price if price is not None else 0
+        return float(price) if price is not None else 0.0
     except:
-        return 0
+        return 0.0
 
 prices = {ticker: get_price(ticker) for ticker in holdings}
 
-# Exact same calculations used in Club Holdings TOTAL row
+# Portfolio calculations (matching Club Holdings TOTAL)
 total_market_value = sum(h["qty"] * prices.get(t, 0) for t, h in holdings.items())
 total_cost_basis = sum(h["cost_basis"] for h in holdings.values())
 overall_return = ((total_market_value / total_cost_basis) - 1) * 100 if total_cost_basis > 0 else 0
