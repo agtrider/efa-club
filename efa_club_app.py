@@ -247,28 +247,35 @@ for m in data["members"]:
 
 save_members(data["members"])
 
-# ====================== HOLDINGS & PRICES ======================
+# ====================== HOLDINGS & LIVE PRICES (IMPROVED) ======================
 df_txn = pd.DataFrame(data["transactions"])
 buys = df_txn[df_txn.get("type", pd.Series([])).str.contains("Buy", na=False)]
 holdings = defaultdict(lambda: {"qty": 0.0, "cost_basis": 0.0})
 for _, row in buys.iterrows():
-    ticker = str(row.get("ticker", "CASH"))
+    ticker = str(row.get("ticker", "CASH")).upper()
     if ticker == "CASH": continue
     qty = float(row.get("quantity", 0))
     cost = abs(float(row.get("amount", 0))) + abs(float(row.get("commission", 0)))
     holdings[ticker]["qty"] += qty
     holdings[ticker]["cost_basis"] += cost
 
-prices = {}
-for ticker in holdings:
+@st.cache_data(ttl=60)
+def get_price(ticker):
     try:
         stock = yf.Ticker(ticker)
         info = stock.info
-        prices[ticker] = info.get("currentPrice") or info.get("regularMarketPreviousClose") or 0
+        price = info.get("currentPrice") or info.get("regularMarketPreviousClose") or info.get("previousClose") or 0
+        if price == 0 or price is None:
+            hist = stock.history(period="5d")
+            if not hist.empty:
+                price = hist["Close"].iloc[-1]
+        return price if price is not None else 0
     except:
-        prices[ticker] = 0
+        return 0
 
-# === EXACT SAME CALCULATIONS USED IN CLUB HOLDINGS TOTAL ===
+prices = {ticker: get_price(ticker) for ticker in holdings}
+
+# Exact same calculations used in Club Holdings TOTAL row
 total_market_value = sum(h["qty"] * prices.get(t, 0) for t, h in holdings.items())
 total_cost_basis = sum(h["cost_basis"] for h in holdings.values())
 overall_return = ((total_market_value / total_cost_basis) - 1) * 100 if total_cost_basis > 0 else 0
