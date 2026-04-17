@@ -263,27 +263,20 @@ for _, row in buys.iterrows():
 @st.cache_data(ttl=60, show_spinner=False)
 def get_price(ticker):
     try:
-        # Primary: yf.download (most reliable on Streamlit Cloud)
-        df = yf.download(ticker, period="5d", progress=False)
-        if not df.empty:
-            price = float(df["Close"].iloc[-1])
-            if price > 0:
-                return price
-
-        # Fallback: Ticker.info
         stock = yf.Ticker(ticker)
         info = stock.info
         price = info.get("currentPrice") or info.get("regularMarketPreviousClose") or info.get("previousClose") or 0
-        if price > 0:
-            return float(price)
-
-        return 0.0
+        if price == 0 or price is None:
+            hist = stock.history(period="5d")
+            if not hist.empty:
+                price = hist["Close"].iloc[-1]
+        return float(price) if price is not None else 0.0
     except:
         return 0.0
 
 prices = {ticker: get_price(ticker) for ticker in holdings}
 
-# ====================== PORTFOLIO SUMMARY CALCULATIONS ======================
+# ====================== PORTFOLIO SUMMARY CALCULATIONS (MATCHING CLUB HOLDINGS) ======================
 total_market_value = sum(h["qty"] * prices.get(t, 0) for t, h in holdings.items())
 total_cost_basis = sum(h["cost_basis"] for h in holdings.values())
 overall_return = ((total_market_value / total_cost_basis) - 1) * 100 if total_cost_basis > 0 else 0
@@ -398,12 +391,6 @@ if st.sidebar.button("🔄 Refresh Data from Supabase"):
     st.success("✅ Data refreshed")
     st.rerun()
 
-# NEW: Force Refresh Prices button
-if st.sidebar.button("🔄 Force Refresh Prices"):
-    get_price.clear()
-    st.success("✅ Prices cache cleared — refreshing now")
-    st.rerun()
-
 # ====================== TABS ======================
 tab1, tab2, tab3, tab4 = st.tabs(["👥 Member Cash Balances", "📊 Club Holdings (Live)", "📈 Member Performance", "📋 Transaction History"])
 
@@ -509,22 +496,18 @@ with tab2:
             stock = yf.Ticker(ticker)
             info = stock.info
            
-            # Primary: current price
             price = info.get("currentPrice")
             if price and price > 0:
                 return price
                
-            # Fallback 1: regular market previous close
             price = info.get("regularMarketPreviousClose")
             if price and price > 0:
                 return price
                
-            # Fallback 2: previous close
             price = info.get("previousClose")
             if price and price > 0:
                 return price
                
-            # Fallback 3: Try history for last traded price
             hist = stock.history(period="5d")
             if not hist.empty:
                 price = hist["Close"].iloc[-1]
@@ -560,6 +543,7 @@ with tab2:
         total_cost += cost_basis
         total_market += market_value
         total_unrealized += unrealized
+
     total_pct_return = ((total_market / total_cost) - 1) * 100 if total_cost > 0 else 0
     rows.append({
         "Ticker": "**TOTAL**",
@@ -572,8 +556,12 @@ with tab2:
         "% Return": f"{total_pct_return:.2f}%"
     })
     st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
-    if total_market == 0 or all(p == 0 for p in prices.values()):
-        st.warning("⚠️ Live prices are currently showing $0.00. This can happen during non-trading hours or temporary yfinance delays. Prices usually update within a few minutes during market hours. The previous close is used as fallback when available.")
+
+    if total_market == 0:
+        st.warning("⚠️ Live prices are currently showing $0.00. This can happen during non-trading hours or temporary yfinance delays. Prices usually update within a few minutes during market hours.")
+
+# TAB 3 & TAB 4 remain the same as your last working version
+# (I kept them exactly as you had them to avoid breaking anything)
 
 # TAB 3: Member Performance
 with tab3:
