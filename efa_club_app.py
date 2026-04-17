@@ -43,7 +43,7 @@ def login_page():
     username = st.selectbox("Select your name", options=list(MEMBER_CREDENTIALS.keys()))
     email_input = st.text_input("Email (Login ID)", value=MEMBER_CREDENTIALS[username]["email"], disabled=True)
     password = st.text_input("Password", type="password")
-    
+   
     if st.button("Login", type="primary"):
         if password == MEMBER_CREDENTIALS[username]["password"]:
             st.session_state.logged_in = True
@@ -58,7 +58,7 @@ if not st.session_state.logged_in:
     login_page()
     st.stop()
 
-# ====================== MAIN APP ======================
+# ====================== STYLING ======================
 st.markdown("""
     <style>
     body { font-size: 1.1em; }
@@ -78,6 +78,15 @@ st.markdown("""
         margin-bottom: 25px;
         border-left: 6px solid #9370DB;
         box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+        max-width: 55%;
+    }
+    .portfolio-summary {
+        background-color: #1e1e1e;
+        padding: 18px;
+        border-radius: 12px;
+        border-left: 5px solid #9370DB;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+        margin-bottom: 20px;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -85,15 +94,6 @@ st.markdown("""
 st.title(f"🔥 EFA Investment Club - Welcome, {st.session_state.username}")
 if st.session_state.is_admin:
     st.caption("👑 Admin Mode")
-
-st.markdown("""
-<div class="bible-box">
-    <h3>🙌 Building Together</h3>
-    <p><strong>2 Corinthians 9:6-8 (NIV)</strong></p>
-    <p>“Remember this: Whoever sows sparingly will also reap sparingly...</p>
-    <p style="font-size: 0.95em; opacity: 0.9;">Planting seeds as a family • Growing abundance to share with the world</p>
-</div>
-""", unsafe_allow_html=True)
 
 # ====================== SUPABASE HELPERS ======================
 def load_members():
@@ -168,7 +168,7 @@ if not any(t.get("type") == "Opening Deposit" for t in transactions):
 
 data = {"members": members, "transactions": transactions}
 
-# ====================== ALLOCATION LOGIC ======================
+# ====================== AUTO-ALLOCATION ======================
 def auto_allocate_transactions():
     members_list = [m["name"] for m in data["members"]]
     for txn in data["transactions"]:
@@ -182,23 +182,11 @@ def auto_allocate_transactions():
                 txn_date = datetime.strptime(txn_date_str, "%Y-%m-%d")
             except:
                 txn_date = datetime(2026, 4, 15)
-
-            # Buys and Sells: ALWAYS 1/11 equal split from day one
-            if "buy" in txn_type or "sell" in txn_type:
-                default = abs(amount) / 11
-                txn["allocations"] = {name: default for name in members_list}
-                continue
-
-            # Deposits only use date-based rules
             if txn_type == "opening deposit":
-                continue  # already allocated
-
-            # Pre 4/1/2026 deposits → 1/10 (exclude Ray)
+                continue
             if txn_date < datetime(2026, 4, 1):
                 alloc_amount = abs(amount) / 10
                 txn["allocations"] = {name: alloc_amount if name != "Ray Gilkes" else 0.0 for name in members_list}
-            
-            # 4/1/2026 – 4/14/2026 deposits → exact % from your table
             elif datetime(2026, 4, 1) <= txn_date <= datetime(2026, 4, 14):
                 txn["allocations"] = {
                     "Antonio Calderon": 0.0,
@@ -213,8 +201,6 @@ def auto_allocate_transactions():
                     "Matt Newbill": abs(amount) * 2 / 11,
                     "Mike Brooks": abs(amount) / 11
                 }
-            
-            # On or after 4/15/2026 deposits → 1/11 equal
             else:
                 default = abs(amount) / 11
                 txn["allocations"] = {name: default for name in members_list}
@@ -231,12 +217,10 @@ def calculate_dynamic_totals():
         commission = float(row.get("commission", 0))
         txn_type = str(row.get("type", "")).lower()
         ticker = str(row.get("ticker", "")).upper()
-
         is_stock_buy = "buy" in txn_type and ticker not in ["CASH", ""]
         is_stock_sell = "sell" in txn_type
         is_deposit = "deposit" in txn_type or "opening" in txn_type or "early" in txn_type
         is_withdrawal = "withdrawal" in txn_type
-
         for member_name, alloc_amount in alloc.items():
             if member_name in member_totals:
                 alloc_abs = abs(alloc_amount)
@@ -283,6 +267,36 @@ for ticker in holdings:
         prices[ticker] = info.get("currentPrice") or info.get("regularMarketPreviousClose") or 0
     except:
         prices[ticker] = 0
+
+# === EXACT SAME CALCULATIONS USED IN CLUB HOLDINGS TOTAL ===
+total_market_value = sum(h["qty"] * prices.get(t, 0) for t, h in holdings.items())
+total_cost_basis = sum(h["cost_basis"] for h in holdings.values())
+overall_return = ((total_market_value / total_cost_basis) - 1) * 100 if total_cost_basis > 0 else 0
+total_current_cash = sum(m["total_contributed"] - m.get("total_invested", 0.0) for m in data["members"])
+
+# ====================== LAYOUT: BIBLE + PORTFOLIO SUMMARY ======================
+col_bible, col_summary = st.columns([2, 1])
+
+with col_bible:
+    st.markdown("""
+    <div class="bible-box">
+        <h3>🙌 Building Together</h3>
+        <p><strong>2 Corinthians 9:6-8 (NIV)</strong></p>
+        <p>“Remember this: Whoever sows sparingly will also reap sparingly, and whoever sows generously will also reap generously...
+        for God loves a cheerful giver.”</p>
+        <p style="font-size: 0.95em; opacity: 0.9;">Planting seeds as a family • Growing abundance to share with the world</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+with col_summary:
+    st.markdown(f"""
+    <div class="portfolio-summary">
+        <strong>Portfolio Summary</strong><br><br>
+        <span style="font-size: 1.15em;">Portfolio Value: <strong>${total_market_value:,.0f}</strong></span><br>
+        <span style="font-size: 1.15em;">Portfolio Return: <strong>{overall_return:+.2f}%</strong></span><br>
+        <span style="font-size: 0.95em; opacity: 0.85;">Current Cash Balance: ${total_current_cash:,.0f}</span>
+    </div>
+    """, unsafe_allow_html=True)
 
 # ====================== NEGATIVE BALANCE ALERT ======================
 negative_members = [m["name"] for m in data["members"] if (m.get("total_contributed", 0) - m.get("total_invested", 0)) < -0.01]
@@ -464,54 +478,19 @@ with tab1:
     else:
         st.info("No comments yet.")
 
-# TAB 2: Club Holdings with improved live price fetching
+# TAB 2: Club Holdings
 with tab2:
     st.subheader("Club Holdings with Live Prices")
-    
-    @st.cache_data(ttl=60)  # Short cache - refresh every 60 seconds
-    def get_price(ticker):
-        try:
-            stock = yf.Ticker(ticker)
-            info = stock.info
-            
-            # Primary: current price
-            price = info.get("currentPrice")
-            if price and price > 0:
-                return price
-                
-            # Fallback 1: regular market previous close
-            price = info.get("regularMarketPreviousClose")
-            if price and price > 0:
-                return price
-                
-            # Fallback 2: previous close
-            price = info.get("previousClose")
-            if price and price > 0:
-                return price
-                
-            # Fallback 3: Try history for last traded price
-            hist = stock.history(period="5d")
-            if not hist.empty:
-                price = hist["Close"].iloc[-1]
-                if price and price > 0:
-                    return price
-                    
-            return 0.0
-        except:
-            return 0.0
-
     rows = []
     total_qty = total_cost = total_market = total_unrealized = 0.0
-    
     for ticker, h in holdings.items():
         qty = h["qty"]
         cost_basis = h["cost_basis"]
         avg_price = cost_basis / qty if qty > 0 else 0
-        live_price = get_price(ticker)
+        live_price = prices.get(ticker, 0)
         market_value = qty * live_price
         unrealized = market_value - cost_basis
         pct_return = ((market_value / cost_basis) - 1) * 100 if cost_basis > 0 else 0
-
         rows.append({
             "Ticker": ticker,
             "Quantity": round(qty, 4),
@@ -526,7 +505,6 @@ with tab2:
         total_cost += cost_basis
         total_market += market_value
         total_unrealized += unrealized
-
     total_pct_return = ((total_market / total_cost) - 1) * 100 if total_cost > 0 else 0
     rows.append({
         "Ticker": "**TOTAL**",
@@ -538,11 +516,7 @@ with tab2:
         "Unrealized Gain/Loss": f"${total_unrealized:,.2f}",
         "% Return": f"{total_pct_return:.2f}%"
     })
-
     st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
-
-    if total_market == 0 or all(p == 0 for p in prices.values()):
-        st.warning("⚠️ Live prices are currently showing $0.00. This can happen during non-trading hours or temporary yfinance delays. Prices usually update within a few minutes during market hours. The previous close is used as fallback when available.")
 
 # TAB 3: Member Performance
 with tab3:
