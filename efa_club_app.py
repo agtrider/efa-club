@@ -464,27 +464,45 @@ with tab1:
     else:
         st.info("No comments yet.")
 
-# TAB 2: Club Holdings (Improved price fetching)
+# TAB 2: Club Holdings with improved live price fetching
 with tab2:
     st.subheader("Club Holdings with Live Prices")
-    rows = []
-    total_qty = total_cost = total_market = total_unrealized = 0.0
-
-    @st.cache_data(ttl=300)  # Cache for 5 minutes
+    
+    @st.cache_data(ttl=60)  # Short cache - refresh every 60 seconds
     def get_price(ticker):
         try:
             stock = yf.Ticker(ticker)
             info = stock.info
-            price = info.get("currentPrice") or info.get("regularMarketPreviousClose") or info.get("previousClose") or 0.0
-            if price == 0.0:
-                # Extra fallback: try history
-                hist = stock.history(period="2d")
-                if not hist.empty:
-                    price = hist["Close"].iloc[-1]
-            return price
+            
+            # Primary: current price
+            price = info.get("currentPrice")
+            if price and price > 0:
+                return price
+                
+            # Fallback 1: regular market previous close
+            price = info.get("regularMarketPreviousClose")
+            if price and price > 0:
+                return price
+                
+            # Fallback 2: previous close
+            price = info.get("previousClose")
+            if price and price > 0:
+                return price
+                
+            # Fallback 3: Try history for last traded price
+            hist = stock.history(period="5d")
+            if not hist.empty:
+                price = hist["Close"].iloc[-1]
+                if price and price > 0:
+                    return price
+                    
+            return 0.0
         except:
             return 0.0
 
+    rows = []
+    total_qty = total_cost = total_market = total_unrealized = 0.0
+    
     for ticker, h in holdings.items():
         qty = h["qty"]
         cost_basis = h["cost_basis"]
@@ -523,8 +541,8 @@ with tab2:
 
     st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
-    if total_market == 0:
-        st.warning("⚠️ Live prices are currently showing $0. This is common outside market hours or during temporary yfinance delays. Prices usually update within a few minutes during trading hours.")
+    if total_market == 0 or all(p == 0 for p in prices.values()):
+        st.warning("⚠️ Live prices are currently showing $0.00. This can happen during non-trading hours or temporary yfinance delays. Prices usually update within a few minutes during market hours. The previous close is used as fallback when available.")
 
 # TAB 3: Member Performance
 with tab3:
