@@ -464,19 +464,36 @@ with tab1:
     else:
         st.info("No comments yet.")
 
-# TAB 2: Club Holdings
+# TAB 2: Club Holdings (Improved price fetching)
 with tab2:
     st.subheader("Club Holdings with Live Prices")
     rows = []
     total_qty = total_cost = total_market = total_unrealized = 0.0
+
+    @st.cache_data(ttl=300)  # Cache for 5 minutes
+    def get_price(ticker):
+        try:
+            stock = yf.Ticker(ticker)
+            info = stock.info
+            price = info.get("currentPrice") or info.get("regularMarketPreviousClose") or info.get("previousClose") or 0.0
+            if price == 0.0:
+                # Extra fallback: try history
+                hist = stock.history(period="2d")
+                if not hist.empty:
+                    price = hist["Close"].iloc[-1]
+            return price
+        except:
+            return 0.0
+
     for ticker, h in holdings.items():
         qty = h["qty"]
         cost_basis = h["cost_basis"]
         avg_price = cost_basis / qty if qty > 0 else 0
-        live_price = prices.get(ticker, 0)
+        live_price = get_price(ticker)
         market_value = qty * live_price
         unrealized = market_value - cost_basis
         pct_return = ((market_value / cost_basis) - 1) * 100 if cost_basis > 0 else 0
+
         rows.append({
             "Ticker": ticker,
             "Quantity": round(qty, 4),
@@ -491,6 +508,7 @@ with tab2:
         total_cost += cost_basis
         total_market += market_value
         total_unrealized += unrealized
+
     total_pct_return = ((total_market / total_cost) - 1) * 100 if total_cost > 0 else 0
     rows.append({
         "Ticker": "**TOTAL**",
@@ -502,7 +520,11 @@ with tab2:
         "Unrealized Gain/Loss": f"${total_unrealized:,.2f}",
         "% Return": f"{total_pct_return:.2f}%"
     })
+
     st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+
+    if total_market == 0:
+        st.warning("⚠️ Live prices are currently showing $0. This is common outside market hours or during temporary yfinance delays. Prices usually update within a few minutes during trading hours.")
 
 # TAB 3: Member Performance
 with tab3:
