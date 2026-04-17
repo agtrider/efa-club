@@ -78,7 +78,7 @@ st.markdown("""
         margin-bottom: 25px;
         border-left: 6px solid #9370DB;
         box-shadow: 0 4px 12px rgba(0,0,0,0.3);
-        max-width: 70%;   /* Made wider as requested */
+        max-width: 70%;   /* Wider purple box */
     }
     .portfolio-summary {
         background-color: #1e1e1e;
@@ -282,14 +282,14 @@ overall_return = ((total_market_value / total_cost_basis) - 1) * 100 if total_co
 total_current_cash = sum(m["total_contributed"] - m.get("total_invested", 0.0) for m in data["members"])
 
 # ====================== LAYOUT: BIBLE + PORTFOLIO SUMMARY ======================
-col_bible, col_summary = st.columns([2, 1])
+col_bible, col_summary = st.columns([3, 1])   # Wider purple box
 
 with col_bible:
     st.markdown("""
     <div class="bible-box">
         <h3>🙌 Building Together</h3>
         <p><strong>2 Corinthians 9:6-8 (NIV)</strong></p>
-        <p>“Remember this: Whoever sows sparingly will also reap sparingly, and whoever sows generously will also reap generously... for God loves a cheerful giver.”</p>
+        <p>“Remember this: Whoever sows sparingly will also reap sparingly, and whoever sows generously will also reap generously. Each of you should give what you have decided in your heart to give, not reluctantly or under compulsion, for God loves a cheerful giver. And God is able to bless you abundantly, so that in all things at all times, having all that you need, you will abound in every good work.”</p>
         <p style="font-size: 0.95em; opacity: 0.9;">Planting seeds as a family • Growing abundance to share with the world</p>
     </div>
     """, unsafe_allow_html=True)
