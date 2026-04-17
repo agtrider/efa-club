@@ -32,7 +32,7 @@ MEMBER_CREDENTIALS = {
     "Ray Gilkes": {"email": "Bison1867@gmail.com", "password": "EFAIC2026006GR"},
     "Jose Calderon": {"email": "Josecalderon036@gmail.com", "password": "EFAIC2026007CJ"},
     "Chad Speegle": {"email": "Chad.speegle@gmail.com", "password": "EFAIC2026008SC"},
-    "Jaydn Tafoya": {"email": "Jadynty21@gmail.com", "password": "EFAIC2026009TJ"},
+    "Jadyn Tafoya": {"email": "Jadynty21@gmail.com", "password": "EFAIC2026009TJ"},
     "Matt Newbill": {"email": "Matthew.Newbill@gmail.com", "password": "EFAIC20260010NM"},
     "Mike Brooks": {"email": "Mikeb1120@gmail.com", "password": "EFAIC20260011BM"}
 }
