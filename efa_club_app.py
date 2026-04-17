@@ -247,7 +247,7 @@ for m in data["members"]:
 
 save_members(data["members"])
 
-# ====================== HOLDINGS & LIVE PRICES (ROBUST) ======================
+# ====================== HOLDINGS & PRICES ======================
 df_txn = pd.DataFrame(data["transactions"])
 buys = df_txn[df_txn.get("type", pd.Series([])).str.contains("Buy", na=False)]
 holdings = defaultdict(lambda: {"qty": 0.0, "cost_basis": 0.0})
@@ -264,9 +264,7 @@ def get_price(ticker):
     try:
         stock = yf.Ticker(ticker)
         info = stock.info
-        price = (info.get("currentPrice") or 
-                 info.get("regularMarketPreviousClose") or 
-                 info.get("previousClose") or 0)
+        price = info.get("currentPrice") or info.get("regularMarketPreviousClose") or info.get("previousClose") or 0
         if price == 0 or price is None:
             hist = stock.history(period="5d")
             if not hist.empty:
@@ -277,7 +275,7 @@ def get_price(ticker):
 
 prices = {ticker: get_price(ticker) for ticker in holdings}
 
-# Portfolio calculations (matching Club Holdings TOTAL)
+# Portfolio calculations for summary box
 total_market_value = sum(h["qty"] * prices.get(t, 0) for t, h in holdings.items())
 total_cost_basis = sum(h["cost_basis"] for h in holdings.values())
 overall_return = ((total_market_value / total_cost_basis) - 1) * 100 if total_cost_basis > 0 else 0
@@ -487,16 +485,50 @@ with tab1:
     else:
         st.info("No comments yet.")
 
-# TAB 2: Club Holdings
+# TAB 2: Club Holdings with improved live price fetching
 with tab2:
     st.subheader("Club Holdings with Live Prices")
+   
+    @st.cache_data(ttl=60)  # Short cache - refresh every 60 seconds
+    def get_price(ticker):
+        try:
+            stock = yf.Ticker(ticker)
+            info = stock.info
+           
+            # Primary: current price
+            price = info.get("currentPrice")
+            if price and price > 0:
+                return price
+               
+            # Fallback 1: regular market previous close
+            price = info.get("regularMarketPreviousClose")
+            if price and price > 0:
+                return price
+               
+            # Fallback 2: previous close
+            price = info.get("previousClose")
+            if price and price > 0:
+                return price
+               
+            # Fallback 3: Try history for last traded price
+            hist = stock.history(period="5d")
+            if not hist.empty:
+                price = hist["Close"].iloc[-1]
+                if price and price > 0:
+                    return price
+                   
+            return 0.0
+        except:
+            return 0.0
+
     rows = []
     total_qty = total_cost = total_market = total_unrealized = 0.0
+   
     for ticker, h in holdings.items():
         qty = h["qty"]
         cost_basis = h["cost_basis"]
         avg_price = cost_basis / qty if qty > 0 else 0
-        live_price = prices.get(ticker, 0)
+        live_price = get_price(ticker)
         market_value = qty * live_price
         unrealized = market_value - cost_basis
         pct_return = ((market_value / cost_basis) - 1) * 100 if cost_basis > 0 else 0
@@ -514,6 +546,7 @@ with tab2:
         total_cost += cost_basis
         total_market += market_value
         total_unrealized += unrealized
+
     total_pct_return = ((total_market / total_cost) - 1) * 100 if total_cost > 0 else 0
     rows.append({
         "Ticker": "**TOTAL**",
@@ -526,6 +559,9 @@ with tab2:
         "% Return": f"{total_pct_return:.2f}%"
     })
     st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+
+    if total_market == 0 or all(p == 0 for p in prices.values()):
+        st.warning("⚠️ Live prices are currently showing $0.00. This can happen during non-trading hours or temporary yfinance delays. Prices usually update within a few minutes during market hours. The previous close is used as fallback when available.")
 
 # TAB 3: Member Performance
 with tab3:
