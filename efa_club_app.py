@@ -78,7 +78,7 @@ st.markdown("""
         margin-bottom: 25px;
         border-left: 6px solid #9370DB;
         box-shadow: 0 4px 12px rgba(0,0,0,0.3);
-        max-width: 70%;   /* Wider purple box */
+        max-width: 70%;
     }
     .portfolio-summary {
         background-color: #1e1e1e;
@@ -282,7 +282,7 @@ overall_return = ((total_market_value / total_cost_basis) - 1) * 100 if total_co
 total_current_cash = sum(m["total_contributed"] - m.get("total_invested", 0.0) for m in data["members"])
 
 # ====================== LAYOUT: BIBLE + PORTFOLIO SUMMARY ======================
-col_bible, col_summary = st.columns([3, 1])   # Wider purple box
+col_bible, col_summary = st.columns([3, 1])
 
 with col_bible:
     st.markdown("""
@@ -447,19 +447,32 @@ with tab1:
 
     st.subheader("💬 Comments")
     comments = load_comments()
+    
+    # Add new comment with logged-in user's name
     with st.form("add_comment"):
         new_comment = st.text_input("Add a comment")
         if st.form_submit_button("Post Comment"):
             if new_comment.strip():
                 comments.append({
                     "date": str(datetime.now().strftime("%Y-%m-%d %H:%M")),
-                    "author": "Member",
+                    "author": st.session_state.username,   # Use logged-in name
                     "text": new_comment.strip(),
                     "resolved": False
                 })
                 save_comments(comments)
                 st.success("Comment posted!")
                 st.rerun()
+
+    # Download button for comments
+    if comments:
+        comments_df = pd.DataFrame(comments)
+        csv = comments_df.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="📥 Download Comments as CSV",
+            data=csv,
+            file_name="efa_comments.csv",
+            mime="text/csv"
+        )
 
     if comments:
         for i, comment in enumerate(comments):
