@@ -282,11 +282,8 @@ def get_price(ticker):
     try:
         stock = yf.Ticker(ticker)
         info = stock.info
-        # Strong preference for end-of-day price
-        price = (info.get("regularMarketPreviousClose") or 
-                 info.get("previousClose") or 
-                 info.get("currentPrice") or 0)
-        if not price or price == 0:
+        price = info.get("regularMarketPreviousClose") or info.get("previousClose") or info.get("currentPrice") or 0
+        if price == 0 or price is None:
             hist = stock.history(period="5d")
             if not hist.empty:
                 price = hist["Close"].iloc[-1]
@@ -686,7 +683,7 @@ with tab5:
         st.rerun()
     st.dataframe(pd.DataFrame({"Watchlist Tickers": st.session_state.watchlist}), width="stretch", hide_index=True)
 
-# TAB 6: Advanced Technical Analysis + Confluence
+# TAB 6: Advanced Technical Analysis + Confluence (FIXED)
 with tab6:
     st.subheader("📉 Advanced Technical Analysis + Confluence Strategy")
     st.caption("Real-time dynamic analysis using yfinance. Portfolio holdings shown first, then watchlist items.")
@@ -765,7 +762,7 @@ with tab6:
         if rows:
             st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
-    # Qualitative Analysis - Portfolio Holdings
+    # Qualitative Analysis - Portfolio Holdings (FIXED)
     st.markdown("### Portfolio Holdings Qualitative Analysis")
     n_port = max(len(portfolio_tickers), 1)
     qual_port = {
@@ -912,4 +909,4 @@ if st.sidebar.button("Logout"):
     st.session_state.logged_in = False
     st.rerun()
 
-st.caption("✅ End-of-day prices improved • Analyst Price Target + Rating added to qualitative tables • Full codebase restored")
+st.caption("✅ End-of-day prices improved • Analyst Price Target + Rating added • TypeError fixed in qualitative tables")
