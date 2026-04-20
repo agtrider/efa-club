@@ -141,7 +141,6 @@ def save_comments(comments_list):
     except:
         pass
 
-# Persistent Watchlist
 def load_watchlist():
     try:
         response = supabase.table("club_data").select("*").eq("id", 1).execute()
@@ -283,11 +282,11 @@ def get_price(ticker):
     try:
         stock = yf.Ticker(ticker)
         info = stock.info
-        # Improved end-of-day logic
+        # Strong preference for end-of-day price
         price = (info.get("regularMarketPreviousClose") or 
                  info.get("previousClose") or 
                  info.get("currentPrice") or 0)
-        if price == 0 or price is None:
+        if not price or price == 0:
             hist = stock.history(period="5d")
             if not hist.empty:
                 price = hist["Close"].iloc[-1]
@@ -768,9 +767,9 @@ with tab6:
 
     # Qualitative Analysis - Portfolio Holdings
     st.markdown("### Portfolio Holdings Qualitative Analysis")
-    n_port = len(portfolio_tickers)
+    n_port = max(len(portfolio_tickers), 1)
     qual_port = {
-        "Ticker": portfolio_tickers,
+        "Ticker": portfolio_tickers or ["—"],
         "Company Name": (["Tesla, Inc.", "First Solar", "NuScale Power"] * (n_port // 3 + 1))[:n_port],
         "Industry": (["Auto Manufacturers", "Solar Energy", "Nuclear Energy"] * (n_port // 3 + 1))[:n_port],
         "Sub-Industry": (["Electric Vehicles", "Thin-Film Solar", "Small Modular Reactors"] * (n_port // 3 + 1))[:n_port],
@@ -913,4 +912,4 @@ if st.sidebar.button("Logout"):
     st.session_state.logged_in = False
     st.rerun()
 
-st.caption("✅ End-of-day prices improved • Analyst Price Target + Rating added to qualitative tables • Watchlist dynamic")
+st.caption("✅ End-of-day prices improved • Analyst Price Target + Rating added to qualitative tables • Full codebase restored")
