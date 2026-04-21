@@ -372,6 +372,9 @@ for _, row in buys.iterrows():
             return 0.0
 
 # ====================== PORTFOLIO SUMMARY CALCULATIONS ======================
+# Calculate prices once at the top level so summary can use them
+prices = {ticker: get_price(ticker) for ticker in holdings} if 'get_price' in globals() else {}
+
 total_market_value = sum(h["qty"] * prices.get(t, 0) for t, h in holdings.items())
 total_cost_basis = sum(h["cost_basis"] for h in holdings.values())
 overall_return = ((total_market_value / total_cost_basis) - 1) * 100 if total_cost_basis > 0 else 0
