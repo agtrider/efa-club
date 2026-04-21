@@ -196,6 +196,7 @@ def save_availability_responses(responses_dict):
         supabase.table("club_data").upsert({"id": 1, "data": data_dict}).execute()
     except:
         pass
+
 def load_finalized_meetings():
     try:
         response = supabase.table("club_data").select("*").eq("id", 1).execute()
@@ -214,9 +215,39 @@ def save_finalized_meetings(meetings):
     except:
         pass
 
+# ====================== ROBUST PRICE FETCHER (used by summary, Tab 2, Tab 6) ======================
+@st.cache_data(ttl=300)
+def get_price(ticker):
+    try:
+        stock = yf.Ticker(ticker)
+        info = stock.info
+        price = info.get("currentPrice")
+        if price and price > 0:
+            return float(price)
+        price = info.get("regularMarketPreviousClose")
+        if price and price > 0:
+            return float(price)
+        price = info.get("previousClose")
+        if price and price > 0:
+            return float(price)
+        hist = stock.history(period="5d", progress=False)
+        if not hist.empty:
+            price = hist["Close"].iloc[-1]
+            if price and price > 0:
+                return float(price)
+        df = yf.download(ticker, period="1d", progress=False)
+        if not df.empty:
+            price = df["Close"].iloc[-1]
+            if price and price > 0:
+                return float(price)
+        return 0.0
+    except Exception:
+        return 0.0
+
 # ====================== INITIAL LOAD & PERMANENT $250 SEED ======================
 members = load_members()
 transactions = load_transactions()
+
 if not any(t.get("type") == "Opening Deposit" for t in transactions):
     members_list = [m["name"] for m in members]
     seed_alloc = {name: 25.0 if name != "Ray Gilkes" else 0.0 for name in members_list}
@@ -312,6 +343,7 @@ def calculate_dynamic_totals():
     return member_totals
 
 dynamic_totals = calculate_dynamic_totals()
+
 for m in data["members"]:
     name = m["name"]
     m["total_invested"] = dynamic_totals.get(name, {}).get("invested", 0.0)
@@ -320,7 +352,7 @@ for m in data["members"]:
 
 save_members(data["members"])
 
-# ====================== HOLDINGS & LIVE PRICES ======================
+# ====================== HOLDINGS ======================
 df_txn = pd.DataFrame(data["transactions"])
 buys = df_txn[df_txn.get("type", pd.Series([])).str.contains("Buy", na=False)]
 holdings = defaultdict(lambda: {"qty": 0.0, "cost_basis": 0.0})
@@ -332,48 +364,8 @@ for _, row in buys.iterrows():
     holdings[ticker]["qty"] += qty
     holdings[ticker]["cost_basis"] += cost
 
-    @st.cache_data(ttl=300)   # 5 minutes - better for prod stability
-    def get_price(ticker):
-        try:
-            stock = yf.Ticker(ticker)
-            info = stock.info
-
-            # 1. Live price (during market hours)
-            price = info.get("currentPrice")
-            if price and price > 0:
-                return float(price)
-
-            # 2. Regular market previous close (best after-hours / weekend fallback)
-            price = info.get("regularMarketPreviousClose")
-            if price and price > 0:
-                return float(price)
-
-            # 3. General previous close
-            price = info.get("previousClose")
-            if price and price > 0:
-                return float(price)
-
-            # 4. History fallback - last 5 trading days
-            hist = stock.history(period="5d", progress=False)
-            if not hist.empty:
-                price = hist["Close"].iloc[-1]
-                if price and price > 0:
-                    return float(price)
-
-            # 5. Last resort - 1 day download
-            df = yf.download(ticker, period="1d", progress=False)
-            if not df.empty:
-                price = df["Close"].iloc[-1]
-                if price and price > 0:
-                    return float(price)
-
-            return 0.0
-        except Exception:
-            return 0.0
-
 # ====================== PORTFOLIO SUMMARY CALCULATIONS ======================
-# Calculate prices once at the top level so summary can use them
-prices = {ticker: get_price(ticker) for ticker in holdings} if 'get_price' in globals() else {}
+prices = {ticker: get_price(ticker) for ticker in holdings}
 
 total_market_value = sum(h["qty"] * prices.get(t, 0) for t, h in holdings.items())
 total_cost_basis = sum(h["cost_basis"] for h in holdings.values())
@@ -531,6 +523,7 @@ with tab1:
         save_members(data["members"])
         st.success("✅ Balances updated")
         st.rerun()
+
     st.subheader("💰 Funding Needs")
     needs = []
     for m in data["members"]:
@@ -544,6 +537,7 @@ with tab1:
             st.warning(need)
     else:
         st.success("✅ All member balances are non-negative.")
+
     st.subheader("💬 Comments")
     comments = load_comments()
     with st.form("add_comment"):
@@ -595,40 +589,7 @@ with tab1:
 with tab2:
     st.subheader("Club Holdings with Live Prices")
 
-    @st.cache_data(ttl=300)
-    def get_price(ticker):
-        try:
-            stock = yf.Ticker(ticker)
-            info = stock.info
-            # 1. Live price during market hours
-            price = info.get("currentPrice")
-            if price and price > 0:
-                return float(price)
-            # 2. Regular market previous close (best after-hours / weekend fallback)
-            price = info.get("regularMarketPreviousClose")
-            if price and price > 0:
-                return float(price)
-            # 3. General previous close
-            price = info.get("previousClose")
-            if price and price > 0:
-                return float(price)
-            # 4. History fallback - last 5 trading days
-            hist = stock.history(period="5d", progress=False)
-            if not hist.empty:
-                price = hist["Close"].iloc[-1]
-                if price and price > 0:
-                    return float(price)
-            # 5. Last resort - 1 day download
-            df = yf.download(ticker, period="1d", progress=False)
-            if not df.empty:
-                price = df["Close"].iloc[-1]
-                if price and price > 0:
-                    return float(price)
-            return 0.0
-        except Exception:
-            return 0.0
-
-    # Calculate prices for all holdings ONCE
+    # Calculate prices once at top level
     prices = {ticker: get_price(ticker) for ticker in holdings}
 
     rows = []
@@ -674,7 +635,7 @@ with tab2:
     if total_market == 0:
         st.warning("⚠️ Live prices are currently showing $0.00. This can happen during non-trading hours or temporary yfinance delays. The previous close is used as fallback when available.")
 
-    # Historical chart (unchanged)
+    # Historical chart
     st.subheader("📈 Portfolio Performance History")
     st.caption("End-of-day portfolio value over time. Select holdings below.")
     if "historical_data" not in st.session_state:
@@ -795,94 +756,14 @@ with tab5:
         st.rerun()
     st.dataframe(pd.DataFrame({"Watchlist Tickers": st.session_state.watchlist}), width="stretch", hide_index=True)
 
-# TAB 6: Advanced Technical Analysis + Confluence
+# TAB 6: Advanced Technical Analysis + Confluence (clean & dynamic)
 with tab6:
     st.subheader("📉 Advanced Technical Analysis + Confluence Strategy")
     st.caption("Real-time dynamic analysis using yfinance. Portfolio holdings shown first, then watchlist items.")
 
-    # Get tickers
     df_txn = pd.DataFrame(data["transactions"])
     portfolio_tickers = [t.upper() for t in df_txn[df_txn.get("type", "").str.contains("Buy", na=False)]["ticker"].unique().tolist() if t and t.upper() != "CASH"]
     watchlist_tickers = st.session_state.get("watchlist", [])
-    all_tickers = list(dict.fromkeys(portfolio_tickers + watchlist_tickers))
-
-    if not all_tickers:
-        all_tickers = ["TSLA", "HOOD", "FSLR", "SMR", "TE", "XRP"]
-
-    # Strong get_price function (same as Tab 2)
-    @st.cache_data(ttl=300)
-    def get_price(ticker):
-        try:
-            stock = yf.Ticker(ticker)
-            info = stock.info
-
-            # 1. Live price during market hours
-            price = info.get("currentPrice")
-            if price and price > 0:
-                return float(price)
-
-            # 2. Regular market previous close (best after-hours / weekend fallback)
-            price = info.get("regularMarketPreviousClose")
-            if price and price > 0:
-                return float(price)
-
-            # 3. General previous close
-            price = info.get("previousClose")
-            if price and price > 0:
-                return float(price)
-
-            # 4. History fallback - last 5 trading days
-            hist = stock.history(period="5d", progress=False)
-            if not hist.empty:
-                price = hist["Close"].iloc[-1]
-                if price and price > 0:
-                    return float(price)
-
-            # 5. Last resort - 1 day download
-            df = yf.download(ticker, period="1d", progress=False)
-            if not df.empty:
-                price = df["Close"].iloc[-1]
-                if price and price > 0:
-                    return float(price)
-
-            return 0.0
-        except Exception:
-            return 0.0
-
-    # Technical indicators function
-    @st.cache_data(ttl=300)
-    def get_technical_indicators(ticker):
-        try:
-            df = yf.download(ticker, period="1y", interval="1d", progress=False)
-            if df.empty:
-                return None
-            df = df.dropna()
-
-            delta = df['Close'].diff()
-            gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-            loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-            rs = gain / loss
-            rsi = 100 - (100 / (1 + rs))
-
-            sma50 = df['Close'].rolling(50).mean().iloc[-1]
-            sma200 = df['Close'].rolling(200).mean().iloc[-1]
-
-            bb_mid = df['Close'].rolling(20).mean()
-            bb_std = df['Close'].rolling(20).std()
-            bb_upper = bb_mid + 2 * bb_std
-            bb_lower = bb_mid - 2 * bb_std
-
-            return {
-                "price": float(df['Close'].iloc[-1]),
-                "rsi": float(rsi.iloc[-1]),
-                "sma50": float(sma50),
-                "sma200": float(sma200),
-                "bb_upper": float(bb_upper.iloc[-1]),
-                "bb_lower": float(bb_lower.iloc[-1]),
-                "bb_mid": float(bb_mid.iloc[-1])
-            }
-        except:
-            return None
 
     # Portfolio Holdings Technical Analysis
     if portfolio_tickers:
@@ -922,7 +803,7 @@ with tab6:
         if rows:
             st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
-    # Qualitative Analysis - Portfolio Holdings (placeholder for now)
+    # Qualitative Analysis - Portfolio Holdings
     st.markdown("### Portfolio Holdings Qualitative Analysis")
     n_port = len(portfolio_tickers)
     qual_port = {
@@ -944,7 +825,7 @@ with tab6:
     }
     st.dataframe(pd.DataFrame(qual_port), width="stretch", hide_index=True)
 
-    # Qualitative Analysis - Watchlist
+    # Qualitative Analysis - Watchlist (fully dynamic from session_state)
     if watchlist_tickers:
         st.markdown("### Watchlist Qualitative Analysis")
         ticker_info = {
@@ -998,16 +879,12 @@ with tab6:
 with tab7:
     st.subheader("📅 Meeting Scheduler")
     st.caption("All data (polls, availability, scheduled meetings) persists in Supabase")
-
-    # Load everything from Supabase
     if "meeting_proposals" not in st.session_state:
         st.session_state.meeting_proposals = load_polls()
     if "availability_responses" not in st.session_state:
         st.session_state.availability_responses = load_availability_responses()
     if "finalized_meetings" not in st.session_state:
         st.session_state.finalized_meetings = load_finalized_meetings()
-
-    # Initialize email storage
     if "poll_email_text" not in st.session_state:
         st.session_state.poll_email_text = ""
     if "final_email_text" not in st.session_state:
@@ -1016,14 +893,13 @@ with tab7:
         st.session_state.change_email_text = ""
     if "cancel_email_text" not in st.session_state:
         st.session_state.cancel_email_text = ""
-
     if st.session_state.is_admin:
         st.markdown("### Admin: Create New Poll")
         week_start = st.date_input("Week starting date", datetime.today() + timedelta(days=7))
         week_end = week_start + timedelta(days=6)
         proposed_times = st.multiselect("Available times (7:30 PM CST default)",
-                                       ["7:30 PM CST", "8:00 PM CST", "8:30 PM CST"],
-                                       default=["7:30 PM CST"])
+                                      ["7:30 PM CST", "8:00 PM CST", "8:30 PM CST"],
+                                      default=["7:30 PM CST"])
         
         if st.button("Create Poll & Generate Email"):
             poll_date = datetime.now().strftime("%Y-%m-%d")
@@ -1040,25 +916,18 @@ with tab7:
             save_polls(st.session_state.meeting_proposals)
             
             poll_email = f"""Subject: EFA Investment Club - Availability Poll Open
-
 Hello Team,
-
 Antonio has initiated a poll to schedule our next 1-hour meeting the week of {week_start.strftime('%B %d')} – {week_end.strftime('%B %d, %Y')}.
-
 This request was created on {poll_date}. Please log into the EFA Club site and provide your availability **by {due_date}**.
-
 Thank you!
 – EFA Investment Club"""
             
             st.session_state.poll_email_text = poll_email
             st.success("✅ Poll created and saved!")
             st.rerun()
-
     if st.session_state.poll_email_text:
-        st.text_area("📧 Poll Email – Click inside, Ctrl+A, then Copy", 
+        st.text_area("📧 Poll Email – Click inside, Ctrl+A, then Copy",
                      st.session_state.poll_email_text, height=180)
-
-    # Current Availability Polls
     if st.session_state.meeting_proposals:
         st.markdown("### Current Availability Polls")
         for i, poll in enumerate(st.session_state.meeting_proposals):
@@ -1074,7 +943,6 @@ Thank you!
                     save_availability_responses(st.session_state.availability_responses)
                     st.success("✅ Availability updated!")
                     st.rerun()
-
                 st.markdown("**Availability Summary for this poll**")
                 responded = list(st.session_state.availability_responses.keys())
                 all_members = list(MEMBER_CREDENTIALS.keys())
@@ -1091,17 +959,13 @@ Thank you!
                         st.write(f"• {slot} — **{count}** members available")
                 else:
                     st.info("No availability submitted yet for this poll.")
-
-    # Finalize Section
     st.markdown("### Finalize / Change / Cancel Meeting")
-
     if st.session_state.is_admin:
         final_date = st.date_input("Meeting date", datetime.today() + timedelta(days=10), key="finalize_date")
         final_time = st.selectbox("Meeting time", ["7:30 PM CST", "8:00 PM CST", "8:30 PM CST"], key="finalize_time")
         
         if st.button("Set Meeting & Generate Email"):
             final_email = f"""Subject: EFA Investment Club Meeting Confirmed
-
 Thank you everyone for providing availability.
 The meeting that works for the most people is **{final_date.strftime('%A, %B %d, %Y')} at {final_time}**.
 Top 2 alternatives:
@@ -1122,12 +986,9 @@ See you then!
             save_finalized_meetings(st.session_state.finalized_meetings)
             st.success("✅ Meeting set and saved to Supabase!")
             st.rerun()
-
     if st.session_state.final_email_text:
-        st.text_area("📧 Final Meeting Email – Click inside, Ctrl+A, then Copy", 
+        st.text_area("📧 Final Meeting Email – Click inside, Ctrl+A, then Copy",
                      st.session_state.final_email_text, height=200)
-
-    # Scheduled Meetings
     if st.session_state.finalized_meetings:
         st.markdown("### Scheduled Meetings")
         for idx, meeting in enumerate(st.session_state.finalized_meetings[:]):
