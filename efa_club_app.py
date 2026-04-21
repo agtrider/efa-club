@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import yfinance as yf
 from datetime import datetime, timedelta
-from collections import defaultdict
+from collections import defaultdict, Counter
 import numpy as np
 
 # ====================== SUPABASE CONFIG ======================
@@ -160,6 +160,60 @@ def save_watchlist(watchlist):
     except:
         pass
 
+# ====================== SCHEDULER PERSISTENCE HELPERS ======================
+def load_polls():
+    try:
+        response = supabase.table("club_data").select("*").eq("id", 1).execute()
+        if response.data and len(response.data) > 0:
+            return response.data[0]["data"].get("polls", [])
+    except:
+        pass
+    return []
+
+def save_polls(polls_list):
+    try:
+        current = supabase.table("club_data").select("*").eq("id", 1).execute().data
+        data_dict = current[0]["data"] if current else {}
+        data_dict["polls"] = polls_list
+        supabase.table("club_data").upsert({"id": 1, "data": data_dict}).execute()
+    except:
+        pass
+
+def load_availability_responses():
+    try:
+        response = supabase.table("club_data").select("*").eq("id", 1).execute()
+        if response.data and len(response.data) > 0:
+            return response.data[0]["data"].get("availability_responses", {})
+    except:
+        pass
+    return {}
+
+def save_availability_responses(responses_dict):
+    try:
+        current = supabase.table("club_data").select("*").eq("id", 1).execute().data
+        data_dict = current[0]["data"] if current else {}
+        data_dict["availability_responses"] = responses_dict
+        supabase.table("club_data").upsert({"id": 1, "data": data_dict}).execute()
+    except:
+        pass
+def load_finalized_meetings():
+    try:
+        response = supabase.table("club_data").select("*").eq("id", 1).execute()
+        if response.data and len(response.data) > 0:
+            return response.data[0]["data"].get("finalized_meetings", [])
+    except:
+        pass
+    return []
+
+def save_finalized_meetings(meetings):
+    try:
+        current = supabase.table("club_data").select("*").eq("id", 1).execute()
+        data = current.data[0]["data"] if current.data else {}
+        data["finalized_meetings"] = meetings
+        supabase.table("club_data").upsert({"id": 1, "data": data}).execute()
+    except:
+        pass
+
 # ====================== INITIAL LOAD & PERMANENT $250 SEED ======================
 members = load_members()
 transactions = load_transactions()
@@ -185,7 +239,6 @@ if not any(t.get("type") == "Opening Deposit" for t in transactions):
 
 data = {"members": members, "transactions": transactions}
 
-# Load persistent watchlist
 if "watchlist" not in st.session_state:
     st.session_state.watchlist = load_watchlist()
 
@@ -566,7 +619,6 @@ with tab2:
     st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
     if total_market == 0:
         st.warning("⚠️ Live prices are currently showing $0.00. This can happen during non-trading hours or temporary yfinance delays. Prices usually update within a few minutes during market hours.")
-
     # Historical chart
     st.subheader("📈 Portfolio Performance History")
     st.caption("End-of-day portfolio value over time. Select holdings below.")
@@ -695,7 +747,6 @@ with tab6:
     all_tickers = list(dict.fromkeys(portfolio_tickers + watchlist_tickers))
     if not all_tickers:
         all_tickers = ["TSLA", "HOOD", "FSLR", "SMR", "TE", "XRP"]
-
     @st.cache_data(ttl=60)
     def get_technical_indicators(ticker):
         try:
@@ -725,7 +776,6 @@ with tab6:
             }
         except:
             return None
-
     # Portfolio Holdings Technical Analysis
     if portfolio_tickers:
         st.markdown("### Portfolio Holdings Analysis")
@@ -744,7 +794,6 @@ with tab6:
                 })
         if rows:
             st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
-
     # Watchlist Technical Analysis
     if watchlist_tickers:
         st.markdown("### Watchlist Analysis")
@@ -763,7 +812,6 @@ with tab6:
                 })
         if rows:
             st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
-
     # Qualitative Analysis - Portfolio Holdings
     st.markdown("### Portfolio Holdings Qualitative Analysis")
     n_port = len(portfolio_tickers)
@@ -785,7 +833,6 @@ with tab6:
         "Industry Growth": (["EV +42% CAGR", "Solar +25%", "Nuclear renaissance"] * (n_port // 3 + 1))[:n_port]
     }
     st.dataframe(pd.DataFrame(qual_port), width="stretch", hide_index=True)
-
     # Qualitative Analysis - Watchlist (FIXED - DYNAMIC PER TICKER)
     if watchlist_tickers:
         st.markdown("### Watchlist Qualitative Analysis")
@@ -832,76 +879,117 @@ with tab6:
             qual_watch["Catalysts"].append(info[12])
             qual_watch["Industry Growth"].append(info[13])
         st.dataframe(pd.DataFrame(qual_watch), width="stretch", hide_index=True)
-
     st.markdown("### Simple Combined Confluence Strategy (Easy-to-Follow Rules)")
     st.markdown("**Confluence Score (0–5)** — Higher score = stronger signal.")
 
-# TAB 7: MEETING SCHEDULER with your exact email templates
+# TAB 7: MEETING SCHEDULER – Full persistence for everything
 with tab7:
     st.subheader("📅 Meeting Scheduler")
-    st.caption("Propose a week and collect availability. Members select specific dates + times.")
+    st.caption("All data (polls, availability, scheduled meetings) persists in Supabase")
+
+    # Load everything from Supabase
     if "meeting_proposals" not in st.session_state:
-        st.session_state.meeting_proposals = []
+        st.session_state.meeting_proposals = load_polls()
     if "availability_responses" not in st.session_state:
-        st.session_state.availability_responses = {}
+        st.session_state.availability_responses = load_availability_responses()
+    if "finalized_meetings" not in st.session_state:
+        st.session_state.finalized_meetings = load_finalized_meetings()
+
+    # Initialize email storage
+    if "poll_email_text" not in st.session_state:
+        st.session_state.poll_email_text = ""
+    if "final_email_text" not in st.session_state:
+        st.session_state.final_email_text = ""
+    if "change_email_text" not in st.session_state:
+        st.session_state.change_email_text = ""
+    if "cancel_email_text" not in st.session_state:
+        st.session_state.cancel_email_text = ""
+
     if st.session_state.is_admin:
         st.markdown("### Admin: Create New Poll")
         week_start = st.date_input("Week starting date", datetime.today() + timedelta(days=7))
         week_end = week_start + timedelta(days=6)
-        proposed_times = st.multiselect("Available times (7:30 PM CST default)", ["7:30 PM CST", "8:00 PM CST", "8:30 PM CST"], default=["7:30 PM CST"])
+        proposed_times = st.multiselect("Available times (7:30 PM CST default)",
+                                       ["7:30 PM CST", "8:00 PM CST", "8:30 PM CST"],
+                                       default=["7:30 PM CST"])
+        
         if st.button("Create Poll & Generate Email"):
             poll_date = datetime.now().strftime("%Y-%m-%d")
             due_date = (datetime.now() + timedelta(days=5)).strftime("%Y-%m-%d")
-            st.session_state.meeting_proposals.append({
+            
+            new_poll = {
+                "id": len(st.session_state.meeting_proposals) + 1,
                 "week_start": week_start.strftime("%Y-%m-%d"),
                 "week_end": week_end.strftime("%Y-%m-%d"),
                 "times": proposed_times,
                 "created": poll_date
-            })
+            }
+            st.session_state.meeting_proposals.append(new_poll)
+            save_polls(st.session_state.meeting_proposals)
+            
             poll_email = f"""Subject: EFA Investment Club - Availability Poll Open
+
 Hello Team,
+
 Antonio has initiated a poll to schedule our next 1-hour meeting the week of {week_start.strftime('%B %d')} – {week_end.strftime('%B %d, %Y')}.
+
 This request was created on {poll_date}. Please log into the EFA Club site and provide your availability **by {due_date}**.
+
 Thank you!
 – EFA Investment Club"""
-            st.text_area("📧 Poll Email (copy & send to members)", poll_email, height=220, key="poll_email")
-            if st.button("📋 Copy Poll Email"):
-                st.success("✅ Poll email copied to clipboard!")
-            st.success("Poll created!")
+            
+            st.session_state.poll_email_text = poll_email
+            st.success("✅ Poll created and saved!")
             st.rerun()
+
+    if st.session_state.poll_email_text:
+        st.text_area("📧 Poll Email – Click inside, Ctrl+A, then Copy", 
+                     st.session_state.poll_email_text, height=180)
+
+    # Current Availability Polls
     if st.session_state.meeting_proposals:
         st.markdown("### Current Availability Polls")
         for i, poll in enumerate(st.session_state.meeting_proposals):
-            st.write(f"**Week of {poll['week_start']} – {poll['week_end']}**")
-            selected = st.multiselect(f"Select your available dates & times",
-                                      [f"{date.strftime('%Y-%m-%d')} {time}" for date in pd.date_range(poll['week_start'], poll['week_end']) for time in poll['times']],
-                                      key=f"poll_{i}")
-            if st.button("Submit Availability", key=f"submit_{i}"):
-                st.session_state.availability_responses[st.session_state.username] = selected
-                st.success("Availability submitted!")
-                st.rerun()
-    if st.session_state.availability_responses:
-        st.markdown("### Availability Summary")
-        responded = list(st.session_state.availability_responses.keys())
-        all_members = list(MEMBER_CREDENTIALS.keys())
-        pending = [m for m in all_members if m not in responded]
-        st.write(f"**Responded ({len(responded)})**: {', '.join(responded)}")
-        if pending:
-            st.write(f"**Still pending ({len(pending)})**: {', '.join(pending)}")
-        from collections import Counter
-        all_selections = []
-        for selections in st.session_state.availability_responses.values():
-            all_selections.extend(selections)
-        top_slots = Counter(all_selections).most_common(3)
-        st.write("**Top 3 best slots**:")
-        for slot, count in top_slots:
-            st.write(f"• {slot} — **{count}** members available")
-    if st.session_state.is_admin and st.session_state.availability_responses:
-        st.markdown("### Finalize Meeting")
-        final_date = st.date_input("Meeting date", datetime.today() + timedelta(days=10))
-        final_time = st.selectbox("Meeting time", ["7:30 PM CST", "8:00 PM CST", "8:30 PM CST"])
+            with st.expander(f"📅 Week of {poll['week_start']} – {poll['week_end']} (created {poll.get('created', '')})", expanded=False):
+                date_options = [f"{date.strftime('%Y-%m-%d')} {time}" for date in pd.date_range(poll['week_start'], poll['week_end']) for time in poll.get('times', [])]
+                selected = st.multiselect(
+                    f"Select your available dates & times for this poll",
+                    date_options,
+                    key=f"poll_{i}_{poll.get('id', i)}"
+                )
+                if st.button("Submit / Update Availability", key=f"submit_{i}"):
+                    st.session_state.availability_responses[st.session_state.username] = selected
+                    save_availability_responses(st.session_state.availability_responses)
+                    st.success("✅ Availability updated!")
+                    st.rerun()
+
+                st.markdown("**Availability Summary for this poll**")
+                responded = list(st.session_state.availability_responses.keys())
+                all_members = list(MEMBER_CREDENTIALS.keys())
+                pending = [m for m in all_members if m not in responded]
+                st.write(f"**Responded ({len(responded)})**: {', '.join(responded) if responded else 'None yet'}")
+                if pending:
+                    st.write(f"**Still pending ({len(pending)})**: {', '.join(pending)}")
+                
+                poll_selections = [s for selections in st.session_state.availability_responses.values() for s in selections if any(d in s for d in [poll['week_start'], poll['week_end']])]
+                if poll_selections:
+                    top_slots = Counter(poll_selections).most_common(3)
+                    st.write("**Top 3 best slots for this poll**:")
+                    for slot, count in top_slots:
+                        st.write(f"• {slot} — **{count}** members available")
+                else:
+                    st.info("No availability submitted yet for this poll.")
+
+    # Finalize Section
+    st.markdown("### Finalize / Change / Cancel Meeting")
+
+    if st.session_state.is_admin:
+        final_date = st.date_input("Meeting date", datetime.today() + timedelta(days=10), key="finalize_date")
+        final_time = st.selectbox("Meeting time", ["7:30 PM CST", "8:00 PM CST", "8:30 PM CST"], key="finalize_time")
+        
         if st.button("Set Meeting & Generate Email"):
             final_email = f"""Subject: EFA Investment Club Meeting Confirmed
+
 Thank you everyone for providing availability.
 The meeting that works for the most people is **{final_date.strftime('%A, %B %d, %Y')} at {final_time}**.
 Top 2 alternatives:
@@ -910,13 +998,43 @@ Top 2 alternatives:
 We will need nearly everyone for the first meeting of the quarter to reach consensus on investments.
 See you then!
 – EFA Investment Club"""
-            st.text_area("📧 Final Meeting Email (copy & send to members)", final_email, height=220, key="final_email")
-            if st.button("📋 Copy Final Email"):
-                st.success("✅ Final email copied to clipboard!")
-            st.success("Meeting set!")
+            st.session_state.final_email_text = final_email
+            
+            new_meeting = {
+                "id": len(st.session_state.finalized_meetings) + 1,
+                "date": final_date.strftime('%Y-%m-%d'),
+                "time": final_time,
+                "notes": "Scheduled meeting"
+            }
+            st.session_state.finalized_meetings.append(new_meeting)
+            save_finalized_meetings(st.session_state.finalized_meetings)
+            st.success("✅ Meeting set and saved to Supabase!")
+            st.rerun()
+
+    if st.session_state.final_email_text:
+        st.text_area("📧 Final Meeting Email – Click inside, Ctrl+A, then Copy", 
+                     st.session_state.final_email_text, height=200)
+
+    # Scheduled Meetings
+    if st.session_state.finalized_meetings:
+        st.markdown("### Scheduled Meetings")
+        for idx, meeting in enumerate(st.session_state.finalized_meetings[:]):
+            with st.expander(f"✅ {meeting['date']} at {meeting['time']}", expanded=False):
+                st.write(meeting.get('notes', 'No notes'))
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button("Change this meeting", key=f"change_meet_{idx}"):
+                        st.info("Use the date/time picker above and press 'Set Meeting' to update this meeting.")
+                with col2:
+                    if st.button("Cancel this meeting", key=f"cancel_meet_{idx}"):
+                        st.session_state.finalized_meetings.pop(idx)
+                        save_finalized_meetings(st.session_state.finalized_meetings)
+                        st.success("✅ Meeting cancelled and removed!")
+                        st.rerun()
 
 if st.sidebar.button("Logout"):
     st.session_state.logged_in = False
     st.rerun()
 
-st.caption("✅ All warnings fixed • Watchlist qualitative analysis now fully dynamic per ticker • $250 seed protected")
+st.caption("✅ All scheduler data (polls + availability + finalized meetings) fully persists in Supabase")
