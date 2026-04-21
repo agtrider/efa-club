@@ -215,7 +215,7 @@ def save_finalized_meetings(meetings):
     except:
         pass
 
-# ====================== ROBUST PRICE FETCHER (used by summary, Tab 2, Tab 6) ======================
+# ====================== ROBUST PRICE FETCHER (used everywhere) ======================
 @st.cache_data(ttl=300)
 def get_price(ticker):
     try:
@@ -490,7 +490,7 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
 
 df_members = pd.DataFrame(data["members"])
 
-# TAB 1: Member Cash Balances
+# TAB 1: Member Cash Balances (unchanged)
 with tab1:
     st.subheader("Member Cash Balances")
     df_display = df_members[["name", "total_contributed"]].copy()
@@ -658,7 +658,7 @@ with tab2:
 
     st.line_chart(df_hist.set_index("Date"), width="stretch")
 
-# TAB 3: Member Performance
+# TAB 3: Member Performance (unchanged)
 with tab3:
     st.subheader("Each Member’s Portfolio Performance")
     st.info("Portfolio Value = securities only (cash shown separately). Ownership based on Total Invested.")
@@ -702,7 +702,7 @@ with tab3:
     })
     st.dataframe(pd.DataFrame(perf_rows), width="stretch", hide_index=True)
 
-# TAB 4: Transaction History
+# TAB 4: Transaction History (unchanged)
 with tab4:
     st.subheader("Transaction History (Master Table)")
     txn_df = pd.DataFrame(data["transactions"])
@@ -756,7 +756,7 @@ with tab5:
         st.rerun()
     st.dataframe(pd.DataFrame({"Watchlist Tickers": st.session_state.watchlist}), width="stretch", hide_index=True)
 
-# TAB 6: Advanced Technical Analysis + Confluence (clean & dynamic)
+# TAB 6: Advanced Technical Analysis + Confluence (dynamic watchlist)
 with tab6:
     st.subheader("📉 Advanced Technical Analysis + Confluence Strategy")
     st.caption("Real-time dynamic analysis using yfinance. Portfolio holdings shown first, then watchlist items.")
@@ -825,7 +825,7 @@ with tab6:
     }
     st.dataframe(pd.DataFrame(qual_port), width="stretch", hide_index=True)
 
-    # Qualitative Analysis - Watchlist (fully dynamic from session_state)
+    # Qualitative Analysis - Watchlist
     if watchlist_tickers:
         st.markdown("### Watchlist Qualitative Analysis")
         ticker_info = {
