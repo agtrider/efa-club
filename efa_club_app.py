@@ -215,7 +215,7 @@ def save_finalized_meetings(meetings):
     except:
         pass
 
-# ====================== ROBUST PRICE FETCHER (used everywhere) ======================
+# ====================== ROBUST PRICE FETCHER ======================
 @st.cache_data(ttl=300)
 def get_price(ticker):
     try:
@@ -244,10 +244,40 @@ def get_price(ticker):
     except Exception:
         return 0.0
 
+# ====================== TECHNICAL INDICATORS FOR TAB 6 ======================
+@st.cache_data(ttl=300)
+def get_technical_indicators(ticker):
+    try:
+        df = yf.download(ticker, period="1y", interval="1d", progress=False)
+        if df.empty:
+            return None
+        df = df.dropna()
+        delta = df['Close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+        rs = gain / loss
+        rsi = 100 - (100 / (1 + rs))
+        sma50 = df['Close'].rolling(50).mean().iloc[-1]
+        sma200 = df['Close'].rolling(200).mean().iloc[-1]
+        bb_mid = df['Close'].rolling(20).mean()
+        bb_std = df['Close'].rolling(20).std()
+        bb_upper = bb_mid + 2 * bb_std
+        bb_lower = bb_mid - 2 * bb_std
+        return {
+            "price": float(df['Close'].iloc[-1]),
+            "rsi": float(rsi.iloc[-1]),
+            "sma50": float(sma50),
+            "sma200": float(sma200),
+            "bb_upper": float(bb_upper.iloc[-1]),
+            "bb_lower": float(bb_lower.iloc[-1]),
+            "bb_mid": float(bb_mid.iloc[-1])
+        }
+    except:
+        return None
+
 # ====================== INITIAL LOAD & PERMANENT $250 SEED ======================
 members = load_members()
 transactions = load_transactions()
-
 if not any(t.get("type") == "Opening Deposit" for t in transactions):
     members_list = [m["name"] for m in members]
     seed_alloc = {name: 25.0 if name != "Ray Gilkes" else 0.0 for name in members_list}
@@ -269,7 +299,6 @@ if not any(t.get("type") == "Opening Deposit" for t in transactions):
     save_members(members)
 
 data = {"members": members, "transactions": transactions}
-
 if "watchlist" not in st.session_state:
     st.session_state.watchlist = load_watchlist()
 
@@ -490,7 +519,7 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
 
 df_members = pd.DataFrame(data["members"])
 
-# TAB 1: Member Cash Balances (unchanged)
+# TAB 1: Member Cash Balances
 with tab1:
     st.subheader("Member Cash Balances")
     df_display = df_members[["name", "total_contributed"]].copy()
@@ -523,7 +552,6 @@ with tab1:
         save_members(data["members"])
         st.success("✅ Balances updated")
         st.rerun()
-
     st.subheader("💰 Funding Needs")
     needs = []
     for m in data["members"]:
@@ -537,7 +565,6 @@ with tab1:
             st.warning(need)
     else:
         st.success("✅ All member balances are non-negative.")
-
     st.subheader("💬 Comments")
     comments = load_comments()
     with st.form("add_comment"):
@@ -588,10 +615,7 @@ with tab1:
 # TAB 2: Club Holdings with Live Prices + Historical Chart
 with tab2:
     st.subheader("Club Holdings with Live Prices")
-
-    # Calculate prices once at top level
     prices = {ticker: get_price(ticker) for ticker in holdings}
-
     rows = []
     total_qty = total_cost = total_market = total_unrealized = 0.0
     for ticker, h in holdings.items():
@@ -602,7 +626,6 @@ with tab2:
         market_value = qty * live_price
         unrealized = market_value - cost_basis
         pct_return = ((market_value / cost_basis) - 1) * 100 if cost_basis > 0 else 0
-
         rows.append({
             "Ticker": ticker,
             "Quantity": round(qty, 4),
@@ -617,7 +640,6 @@ with tab2:
         total_cost += cost_basis
         total_market += market_value
         total_unrealized += unrealized
-
     total_pct_return = ((total_market / total_cost) - 1) * 100 if total_cost > 0 else 0
     rows.append({
         "Ticker": "**TOTAL**",
@@ -629,12 +651,9 @@ with tab2:
         "Unrealized Gain/Loss": f"${total_unrealized:,.2f}",
         "% Return": f"{total_pct_return:.2f}%"
     })
-
     st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
-
     if total_market == 0:
         st.warning("⚠️ Live prices are currently showing $0.00. This can happen during non-trading hours or temporary yfinance delays. The previous close is used as fallback when available.")
-
     # Historical chart
     st.subheader("📈 Portfolio Performance History")
     st.caption("End-of-day portfolio value over time. Select holdings below.")
@@ -645,20 +664,17 @@ with tab2:
         }
         for ticker in holdings.keys():
             st.session_state.historical_data[ticker] = np.random.normal(100, 30, 45).cumsum()
-
     all_holdings = list(holdings.keys())
     selected = st.multiselect("Select holdings to display", all_holdings, default=[])
     show_total = st.checkbox("Include Total Portfolio", value=True)
-
     df_hist = pd.DataFrame({"Date": st.session_state.historical_data["dates"]})
     if show_total:
         df_hist["Total Portfolio"] = st.session_state.historical_data["total_value"]
     for ticker in selected:
         df_hist[ticker] = st.session_state.historical_data[ticker]
-
     st.line_chart(df_hist.set_index("Date"), width="stretch")
 
-# TAB 3: Member Performance (unchanged)
+# TAB 3: Member Performance
 with tab3:
     st.subheader("Each Member’s Portfolio Performance")
     st.info("Portfolio Value = securities only (cash shown separately). Ownership based on Total Invested.")
@@ -702,7 +718,7 @@ with tab3:
     })
     st.dataframe(pd.DataFrame(perf_rows), width="stretch", hide_index=True)
 
-# TAB 4: Transaction History (unchanged)
+# TAB 4: Transaction History
 with tab4:
     st.subheader("Transaction History (Master Table)")
     txn_df = pd.DataFrame(data["transactions"])
@@ -756,15 +772,13 @@ with tab5:
         st.rerun()
     st.dataframe(pd.DataFrame({"Watchlist Tickers": st.session_state.watchlist}), width="stretch", hide_index=True)
 
-# TAB 6: Advanced Technical Analysis + Confluence (dynamic watchlist)
+# TAB 6: Advanced Technical Analysis + Confluence
 with tab6:
     st.subheader("📉 Advanced Technical Analysis + Confluence Strategy")
     st.caption("Real-time dynamic analysis using yfinance. Portfolio holdings shown first, then watchlist items.")
-
     df_txn = pd.DataFrame(data["transactions"])
     portfolio_tickers = [t.upper() for t in df_txn[df_txn.get("type", "").str.contains("Buy", na=False)]["ticker"].unique().tolist() if t and t.upper() != "CASH"]
     watchlist_tickers = st.session_state.get("watchlist", [])
-
     # Portfolio Holdings Technical Analysis
     if portfolio_tickers:
         st.markdown("### Portfolio Holdings Analysis")
@@ -783,7 +797,6 @@ with tab6:
                 })
         if rows:
             st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
-
     # Watchlist Technical Analysis
     if watchlist_tickers:
         st.markdown("### Watchlist Analysis")
@@ -802,7 +815,6 @@ with tab6:
                 })
         if rows:
             st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
-
     # Qualitative Analysis - Portfolio Holdings
     st.markdown("### Portfolio Holdings Qualitative Analysis")
     n_port = len(portfolio_tickers)
@@ -824,7 +836,6 @@ with tab6:
         "Industry Growth": (["EV +42% CAGR", "Solar +25%", "Nuclear renaissance"] * (n_port // 3 + 1))[:n_port]
     }
     st.dataframe(pd.DataFrame(qual_port), width="stretch", hide_index=True)
-
     # Qualitative Analysis - Watchlist
     if watchlist_tickers:
         st.markdown("### Watchlist Qualitative Analysis")
@@ -871,7 +882,6 @@ with tab6:
             qual_watch["Catalysts"].append(info[12])
             qual_watch["Industry Growth"].append(info[13])
         st.dataframe(pd.DataFrame(qual_watch), width="stretch", hide_index=True)
-
     st.markdown("### Simple Combined Confluence Strategy (Easy-to-Follow Rules)")
     st.markdown("**Confluence Score (0–5)** — Higher score = stronger signal.")
 
