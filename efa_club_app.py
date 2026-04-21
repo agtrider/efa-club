@@ -588,56 +588,48 @@ with tab1:
     else:
         st.info("No comments yet.")
 
-# TAB 2: Club Holdings with historical chart
-# TAB 2: Club Holdings with historical chart
+# TAB 2: Club Holdings with Live Prices + Historical Chart
 with tab2:
     st.subheader("Club Holdings with Live Prices")
 
-    @st.cache_data(ttl=300)  # 5 minutes - better for prod stability
+    @st.cache_data(ttl=300)
     def get_price(ticker):
         try:
             stock = yf.Ticker(ticker)
             info = stock.info
-
             # 1. Live price during market hours
             price = info.get("currentPrice")
             if price and price > 0:
                 return float(price)
-
             # 2. Regular market previous close (best after-hours / weekend fallback)
             price = info.get("regularMarketPreviousClose")
             if price and price > 0:
                 return float(price)
-
             # 3. General previous close
             price = info.get("previousClose")
             if price and price > 0:
                 return float(price)
-
             # 4. History fallback - last 5 trading days
             hist = stock.history(period="5d", progress=False)
             if not hist.empty:
                 price = hist["Close"].iloc[-1]
                 if price and price > 0:
                     return float(price)
-
             # 5. Last resort - 1 day download
             df = yf.download(ticker, period="1d", progress=False)
             if not df.empty:
                 price = df["Close"].iloc[-1]
                 if price and price > 0:
                     return float(price)
-
             return 0.0
         except Exception:
             return 0.0
 
-    # Calculate prices for all holdings
+    # Calculate prices for all holdings ONCE
     prices = {ticker: get_price(ticker) for ticker in holdings}
 
     rows = []
     total_qty = total_cost = total_market = total_unrealized = 0.0
-
     for ticker, h in holdings.items():
         qty = h["qty"]
         cost_basis = h["cost_basis"]
@@ -657,14 +649,12 @@ with tab2:
             "Unrealized Gain/Loss": f"${unrealized:,.2f}",
             "% Return": f"{pct_return:.2f}%"
         })
-
         total_qty += qty
         total_cost += cost_basis
         total_market += market_value
         total_unrealized += unrealized
 
     total_pct_return = ((total_market / total_cost) - 1) * 100 if total_cost > 0 else 0
-
     rows.append({
         "Ticker": "**TOTAL**",
         "Quantity": round(total_qty, 4),
@@ -1000,7 +990,7 @@ with tab6:
 
     st.markdown("### Simple Combined Confluence Strategy (Easy-to-Follow Rules)")
     st.markdown("**Confluence Score (0–5)** — Higher score = stronger signal.")
-      
+
 # TAB 7: MEETING SCHEDULER – Full persistence for everything
 with tab7:
     st.subheader("📅 Meeting Scheduler")
