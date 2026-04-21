@@ -762,9 +762,11 @@ with tab6:
         if rows:
             st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
-    # Qualitative Analysis - Portfolio Holdings (FIXED)
+    # Qualitative Analysis - Portfolio Holdings (FIXED with safe slicing)
     st.markdown("### Portfolio Holdings Qualitative Analysis")
     n_port = max(len(portfolio_tickers), 1)
+    base_target = ["$450", "$220", "$18"]
+    base_rating = ["Overweight", "Market Weight", "Overweight"]
     qual_port = {
         "Ticker": portfolio_tickers or ["—"],
         "Company Name": (["Tesla, Inc.", "First Solar", "NuScale Power"] * (n_port // 3 + 1))[:n_port],
@@ -781,8 +783,8 @@ with tab6:
         "Major News": (["Robotaxi event upcoming", "IRA tax credits boost", "First SMR deployment"] * (n_port // 3 + 1))[:n_port],
         "Catalysts": (["FSD v13 release, energy storage growth", "Solar demand surge", "Nuclear policy support"] * (n_port // 3 + 1))[:n_port],
         "Industry Growth": (["EV +42% CAGR", "Solar +25%", "Nuclear renaissance"] * (n_port // 3 + 1))[:n_port],
-        "Analyst Price Target": ["$450", "$220", "$18"] * (n_port // 3 + 1)[:n_port],
-        "Rating": ["Overweight", "Market Weight", "Overweight"] * (n_port // 3 + 1)[:n_port]
+        "Analyst Price Target": (base_target * (n_port // 3 + 1))[:n_port],
+        "Rating": (base_rating * (n_port // 3 + 1))[:n_port]
     }
     st.dataframe(pd.DataFrame(qual_port), width="stretch", hide_index=True)
 
