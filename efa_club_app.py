@@ -332,21 +332,44 @@ for _, row in buys.iterrows():
     holdings[ticker]["qty"] += qty
     holdings[ticker]["cost_basis"] += cost
 
-@st.cache_data(ttl=60)
-def get_price(ticker):
-    try:
-        stock = yf.Ticker(ticker)
-        info = stock.info
-        price = info.get("currentPrice") or info.get("regularMarketPreviousClose") or info.get("previousClose") or 0
-        if price == 0 or price is None:
-            hist = stock.history(period="5d")
+    @st.cache_data(ttl=300)   # 5 minutes - better for prod stability
+    def get_price(ticker):
+        try:
+            stock = yf.Ticker(ticker)
+            info = stock.info
+
+            # 1. Live price (during market hours)
+            price = info.get("currentPrice")
+            if price and price > 0:
+                return float(price)
+
+            # 2. Regular market previous close (best after-hours / weekend fallback)
+            price = info.get("regularMarketPreviousClose")
+            if price and price > 0:
+                return float(price)
+
+            # 3. General previous close
+            price = info.get("previousClose")
+            if price and price > 0:
+                return float(price)
+
+            # 4. History fallback - last 5 trading days
+            hist = stock.history(period="5d", progress=False)
             if not hist.empty:
                 price = hist["Close"].iloc[-1]
-        return float(price) if price is not None else 0.0
-    except:
-        return 0.0
+                if price and price > 0:
+                    return float(price)
 
-prices = {ticker: get_price(ticker) for ticker in holdings}
+            # 5. Last resort - 1 day download
+            df = yf.download(ticker, period="1d", progress=False)
+            if not df.empty:
+                price = df["Close"].iloc[-1]
+                if price and price > 0:
+                    return float(price)
+
+            return 0.0
+        except Exception:
+            return 0.0
 
 # ====================== PORTFOLIO SUMMARY CALCULATIONS ======================
 total_market_value = sum(h["qty"] * prices.get(t, 0) for t, h in holdings.items())
@@ -566,31 +589,64 @@ with tab1:
         st.info("No comments yet.")
 
 # TAB 2: Club Holdings with historical chart
+# TAB 2: Club Holdings with historical chart
 with tab2:
     st.subheader("Club Holdings with Live Prices")
-    @st.cache_data(ttl=60)
+
+    @st.cache_data(ttl=300)  # 5 minutes - better for prod stability
     def get_price(ticker):
         try:
             stock = yf.Ticker(ticker)
             info = stock.info
-            price = info.get("currentPrice") or info.get("regularMarketPreviousClose") or info.get("previousClose") or 0
-            if price == 0 or price is None:
-                hist = stock.history(period="5d")
-                if not hist.empty:
-                    price = hist["Close"].iloc[-1]
-            return float(price) if price is not None else 0.0
-        except:
+
+            # 1. Live price during market hours
+            price = info.get("currentPrice")
+            if price and price > 0:
+                return float(price)
+
+            # 2. Regular market previous close (best after-hours / weekend fallback)
+            price = info.get("regularMarketPreviousClose")
+            if price and price > 0:
+                return float(price)
+
+            # 3. General previous close
+            price = info.get("previousClose")
+            if price and price > 0:
+                return float(price)
+
+            # 4. History fallback - last 5 trading days
+            hist = stock.history(period="5d", progress=False)
+            if not hist.empty:
+                price = hist["Close"].iloc[-1]
+                if price and price > 0:
+                    return float(price)
+
+            # 5. Last resort - 1 day download
+            df = yf.download(ticker, period="1d", progress=False)
+            if not df.empty:
+                price = df["Close"].iloc[-1]
+                if price and price > 0:
+                    return float(price)
+
             return 0.0
+        except Exception:
+            return 0.0
+
+    # Calculate prices for all holdings
+    prices = {ticker: get_price(ticker) for ticker in holdings}
+
     rows = []
     total_qty = total_cost = total_market = total_unrealized = 0.0
+
     for ticker, h in holdings.items():
         qty = h["qty"]
         cost_basis = h["cost_basis"]
         avg_price = cost_basis / qty if qty > 0 else 0
-        live_price = get_price(ticker)
+        live_price = prices.get(ticker, 0.0)
         market_value = qty * live_price
         unrealized = market_value - cost_basis
         pct_return = ((market_value / cost_basis) - 1) * 100 if cost_basis > 0 else 0
+
         rows.append({
             "Ticker": ticker,
             "Quantity": round(qty, 4),
@@ -601,11 +657,14 @@ with tab2:
             "Unrealized Gain/Loss": f"${unrealized:,.2f}",
             "% Return": f"{pct_return:.2f}%"
         })
+
         total_qty += qty
         total_cost += cost_basis
         total_market += market_value
         total_unrealized += unrealized
+
     total_pct_return = ((total_market / total_cost) - 1) * 100 if total_cost > 0 else 0
+
     rows.append({
         "Ticker": "**TOTAL**",
         "Quantity": round(total_qty, 4),
@@ -616,10 +675,13 @@ with tab2:
         "Unrealized Gain/Loss": f"${total_unrealized:,.2f}",
         "% Return": f"{total_pct_return:.2f}%"
     })
+
     st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+
     if total_market == 0:
-        st.warning("⚠️ Live prices are currently showing $0.00. This can happen during non-trading hours or temporary yfinance delays. Prices usually update within a few minutes during market hours.")
-    # Historical chart
+        st.warning("⚠️ Live prices are currently showing $0.00. This can happen during non-trading hours or temporary yfinance delays. The previous close is used as fallback when available.")
+
+    # Historical chart (unchanged)
     st.subheader("📈 Portfolio Performance History")
     st.caption("End-of-day portfolio value over time. Select holdings below.")
     if "historical_data" not in st.session_state:
@@ -629,14 +691,17 @@ with tab2:
         }
         for ticker in holdings.keys():
             st.session_state.historical_data[ticker] = np.random.normal(100, 30, 45).cumsum()
+
     all_holdings = list(holdings.keys())
     selected = st.multiselect("Select holdings to display", all_holdings, default=[])
     show_total = st.checkbox("Include Total Portfolio", value=True)
+
     df_hist = pd.DataFrame({"Date": st.session_state.historical_data["dates"]})
     if show_total:
         df_hist["Total Portfolio"] = st.session_state.historical_data["total_value"]
     for ticker in selected:
         df_hist[ticker] = st.session_state.historical_data[ticker]
+
     st.line_chart(df_hist.set_index("Date"), width="stretch")
 
 # TAB 3: Member Performance
@@ -741,41 +806,91 @@ with tab5:
 with tab6:
     st.subheader("📉 Advanced Technical Analysis + Confluence Strategy")
     st.caption("Real-time dynamic analysis using yfinance. Portfolio holdings shown first, then watchlist items.")
+
+    # Get tickers
     df_txn = pd.DataFrame(data["transactions"])
     portfolio_tickers = [t.upper() for t in df_txn[df_txn.get("type", "").str.contains("Buy", na=False)]["ticker"].unique().tolist() if t and t.upper() != "CASH"]
     watchlist_tickers = st.session_state.get("watchlist", [])
     all_tickers = list(dict.fromkeys(portfolio_tickers + watchlist_tickers))
+
     if not all_tickers:
         all_tickers = ["TSLA", "HOOD", "FSLR", "SMR", "TE", "XRP"]
-    @st.cache_data(ttl=60)
+
+    # Strong get_price function (same as Tab 2)
+    @st.cache_data(ttl=300)
+    def get_price(ticker):
+        try:
+            stock = yf.Ticker(ticker)
+            info = stock.info
+
+            # 1. Live price during market hours
+            price = info.get("currentPrice")
+            if price and price > 0:
+                return float(price)
+
+            # 2. Regular market previous close (best after-hours / weekend fallback)
+            price = info.get("regularMarketPreviousClose")
+            if price and price > 0:
+                return float(price)
+
+            # 3. General previous close
+            price = info.get("previousClose")
+            if price and price > 0:
+                return float(price)
+
+            # 4. History fallback - last 5 trading days
+            hist = stock.history(period="5d", progress=False)
+            if not hist.empty:
+                price = hist["Close"].iloc[-1]
+                if price and price > 0:
+                    return float(price)
+
+            # 5. Last resort - 1 day download
+            df = yf.download(ticker, period="1d", progress=False)
+            if not df.empty:
+                price = df["Close"].iloc[-1]
+                if price and price > 0:
+                    return float(price)
+
+            return 0.0
+        except Exception:
+            return 0.0
+
+    # Technical indicators function
+    @st.cache_data(ttl=300)
     def get_technical_indicators(ticker):
         try:
-            df = yf.download(ticker, period="1y", interval="1d")
+            df = yf.download(ticker, period="1y", interval="1d", progress=False)
             if df.empty:
                 return None
             df = df.dropna()
+
             delta = df['Close'].diff()
             gain = (delta.where(delta > 0, 0)).rolling(14).mean()
             loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
             rs = gain / loss
             rsi = 100 - (100 / (1 + rs))
-            sma50 = df['Close'].rolling(50).mean().iloc[-1].item()
-            sma200 = df['Close'].rolling(200).mean().iloc[-1].item()
+
+            sma50 = df['Close'].rolling(50).mean().iloc[-1]
+            sma200 = df['Close'].rolling(200).mean().iloc[-1]
+
             bb_mid = df['Close'].rolling(20).mean()
             bb_std = df['Close'].rolling(20).std()
             bb_upper = bb_mid + 2 * bb_std
             bb_lower = bb_mid - 2 * bb_std
+
             return {
-                "price": df['Close'].iloc[-1].item(),
-                "rsi": rsi.iloc[-1].item(),
-                "sma50": sma50,
-                "sma200": sma200,
-                "bb_upper": bb_upper.iloc[-1].item(),
-                "bb_lower": bb_lower.iloc[-1].item(),
-                "bb_mid": bb_mid.iloc[-1].item()
+                "price": float(df['Close'].iloc[-1]),
+                "rsi": float(rsi.iloc[-1]),
+                "sma50": float(sma50),
+                "sma200": float(sma200),
+                "bb_upper": float(bb_upper.iloc[-1]),
+                "bb_lower": float(bb_lower.iloc[-1]),
+                "bb_mid": float(bb_mid.iloc[-1])
             }
         except:
             return None
+
     # Portfolio Holdings Technical Analysis
     if portfolio_tickers:
         st.markdown("### Portfolio Holdings Analysis")
@@ -794,6 +909,7 @@ with tab6:
                 })
         if rows:
             st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+
     # Watchlist Technical Analysis
     if watchlist_tickers:
         st.markdown("### Watchlist Analysis")
@@ -812,7 +928,8 @@ with tab6:
                 })
         if rows:
             st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
-    # Qualitative Analysis - Portfolio Holdings
+
+    # Qualitative Analysis - Portfolio Holdings (placeholder for now)
     st.markdown("### Portfolio Holdings Qualitative Analysis")
     n_port = len(portfolio_tickers)
     qual_port = {
@@ -833,7 +950,8 @@ with tab6:
         "Industry Growth": (["EV +42% CAGR", "Solar +25%", "Nuclear renaissance"] * (n_port // 3 + 1))[:n_port]
     }
     st.dataframe(pd.DataFrame(qual_port), width="stretch", hide_index=True)
-    # Qualitative Analysis - Watchlist (FIXED - DYNAMIC PER TICKER)
+
+    # Qualitative Analysis - Watchlist
     if watchlist_tickers:
         st.markdown("### Watchlist Qualitative Analysis")
         ticker_info = {
@@ -879,9 +997,10 @@ with tab6:
             qual_watch["Catalysts"].append(info[12])
             qual_watch["Industry Growth"].append(info[13])
         st.dataframe(pd.DataFrame(qual_watch), width="stretch", hide_index=True)
+
     st.markdown("### Simple Combined Confluence Strategy (Easy-to-Follow Rules)")
     st.markdown("**Confluence Score (0–5)** — Higher score = stronger signal.")
-
+      
 # TAB 7: MEETING SCHEDULER – Full persistence for everything
 with tab7:
     st.subheader("📅 Meeting Scheduler")
