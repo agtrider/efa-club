@@ -215,31 +215,44 @@ def save_finalized_meetings(meetings):
     except:
         pass
 
-# ====================== ROBUST PRICE FETCHER ======================
-@st.cache_data(ttl=300)
+# ====================== ULTRA-ROBUST PRICE FETCHER (fixed for TE and all future tickers) ======================
+@st.cache_data(ttl=180)
 def get_price(ticker):
     try:
         stock = yf.Ticker(ticker)
         info = stock.info
+
+        # 1. Live price (market hours)
         price = info.get("currentPrice")
         if price and price > 0:
             return float(price)
+
+        # 2. Regular market previous close
         price = info.get("regularMarketPreviousClose")
         if price and price > 0:
             return float(price)
+
+        # 3. Previous close
         price = info.get("previousClose")
         if price and price > 0:
             return float(price)
-        hist = stock.history(period="5d", progress=False)
-        if not hist.empty:
-            price = hist["Close"].iloc[-1]
-            if price and price > 0:
-                return float(price)
-        df = yf.download(ticker, period="1d", progress=False)
-        if not df.empty:
-            price = df["Close"].iloc[-1]
-            if price and price > 0:
-                return float(price)
+
+        # 4. Stronger history fallback
+        for period in ["5d", "1mo", "3mo"]:
+            hist = stock.history(period=period, progress=False)
+            if not hist.empty:
+                price = hist["Close"].iloc[-1]
+                if price and price > 0:
+                    return float(price)
+
+        # 5. Download fallback with auto_adjust
+        for period in ["1d", "5d", "1mo"]:
+            df = yf.download(ticker, period=period, progress=False, auto_adjust=True)
+            if not df.empty:
+                price = df["Close"].iloc[-1]
+                if price and price > 0:
+                    return float(price)
+
         return 0.0
     except Exception:
         return 0.0
