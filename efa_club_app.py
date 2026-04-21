@@ -774,18 +774,18 @@ with tab5:
         st.rerun()
     st.dataframe(pd.DataFrame({"Watchlist Tickers": st.session_state.watchlist}), width="stretch", hide_index=True)
 
-# TAB 6: Advanced Technical Analysis + Confluence + Grok-ready Dynamic Analysis
+# TAB 6: Advanced Technical Analysis + Grok-Powered Qualitative Analysis
 with tab6:
-    st.subheader("📉 Advanced Technical Analysis + Confluence Strategy")
-    st.caption("Real-time dynamic analysis using yfinance. Portfolio holdings shown first, then watchlist items. Ready for Grok API enrichment.")
+    st.subheader("📉 Advanced Technical Analysis & Grok-Powered Insights")
+    st.caption("Technical indicators via yfinance • Deep qualitative + analyst analysis powered by Grok API")
 
     df_txn = pd.DataFrame(data["transactions"])
     portfolio_tickers = [t.upper() for t in df_txn[df_txn.get("type", "").str.contains("Buy", na=False)]["ticker"].unique().tolist() if t and t.upper() != "CASH"]
     watchlist_tickers = st.session_state.get("watchlist", [])
 
-    # === Portfolio Holdings Technical Analysis ===
+    # ====================== TECHNICAL ANALYSIS ======================
     if portfolio_tickers:
-        st.markdown("### Portfolio Holdings Technical Analysis")
+        st.markdown("### 📊 Portfolio Holdings – Technical Analysis")
         rows = []
         for ticker in portfolio_tickers:
             data_ind = get_technical_indicators(ticker)
@@ -796,15 +796,14 @@ with tab6:
                     "RSI (14)": f"{data_ind['rsi']:.1f}",
                     "50-day SMA": f"${data_ind['sma50']:,.2f}",
                     "200-day SMA": f"${data_ind['sma200']:,.2f}",
-                    "Bollinger Bands Context": "Upper" if data_ind['price'] > data_ind['bb_upper'] else "Lower" if data_ind['price'] < data_ind['bb_lower'] else "Middle",
-                    "Recommendation": "Buy" if data_ind['rsi'] < 30 else "Sell" if data_ind['rsi'] > 70 else "Hold"
+                    "Bollinger Context": "Upper" if data_ind['price'] > data_ind['bb_upper'] else "Lower" if data_ind['price'] < data_ind['bb_lower'] else "Middle",
+                    "Recommendation": "Strong Buy" if data_ind['rsi'] < 30 else "Sell" if data_ind['rsi'] > 70 else "Hold"
                 })
         if rows:
             st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
-    # === Watchlist Technical Analysis ===
     if watchlist_tickers:
-        st.markdown("### Watchlist Technical Analysis")
+        st.markdown("### 📊 Watchlist – Technical Analysis")
         rows = []
         for ticker in watchlist_tickers:
             data_ind = get_technical_indicators(ticker)
@@ -815,113 +814,92 @@ with tab6:
                     "RSI (14)": f"{data_ind['rsi']:.1f}",
                     "50-day SMA": f"${data_ind['sma50']:,.2f}",
                     "200-day SMA": f"${data_ind['sma200']:,.2f}",
-                    "Bollinger Bands Context": "Upper" if data_ind['price'] > data_ind['bb_upper'] else "Lower" if data_ind['price'] < data_ind['bb_lower'] else "Middle",
-                    "Recommendation": "Buy" if data_ind['rsi'] < 30 else "Sell" if data_ind['rsi'] > 70 else "Hold"
+                    "Bollinger Context": "Upper" if data_ind['price'] > data_ind['bb_upper'] else "Lower" if data_ind['price'] < data_ind['bb_lower'] else "Middle",
+                    "Recommendation": "Strong Buy" if data_ind['rsi'] < 30 else "Sell" if data_ind['rsi'] > 70 else "Hold"
                 })
         if rows:
             st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
-    # === Dynamic Qualitative Analysis - Portfolio Holdings ===
-    st.markdown("### Portfolio Holdings Qualitative Analysis")
-    if portfolio_tickers:
-        qual_port = {
-            "Ticker": portfolio_tickers,
-            "Company Name": [],
-            "Industry": [],
-            "Sub-Industry": [],
-            "Description": [],
-            "Founded": [],
-            "Revenue Growth": [],
-            "Gross Margin": [],
-            "Net Margin": [],
-            "Cash Flow": [],
-            "Major Competitors": [],
-            "Best of Breed?": [],
-            "Major News": [],
-            "Catalysts": [],
-            "Industry Growth": [],
-            "Current Price": [],
-            "Analyst High Target": [],
-            "Analyst Avg Target": [],
-            "Analyst Low Target": [],
-            "Analyst Rating": []
-        }
-        for ticker in portfolio_tickers:
-            # Placeholder dynamic structure - ready for Grok API to populate real data
-            qual_port["Company Name"].append("Dynamic Company Name")
-            qual_port["Industry"].append("Dynamic Industry")
-            qual_port["Sub-Industry"].append("Dynamic Sub-Industry")
-            qual_port["Description"].append("Dynamic business description - ready for Grok enrichment")
-            qual_port["Founded"].append("N/A")
-            qual_port["Revenue Growth"].append("N/A")
-            qual_port["Gross Margin"].append("N/A")
-            qual_port["Net Margin"].append("N/A")
-            qual_port["Cash Flow"].append("N/A")
-            qual_port["Major Competitors"].append("N/A")
-            qual_port["Best of Breed?"].append("N/A")
-            qual_port["Major News"].append("N/A")
-            qual_port["Catalysts"].append("N/A")
-            qual_port["Industry Growth"].append("N/A")
-            qual_port["Current Price"].append(f"${get_price(ticker):,.2f}")
-            qual_port["Analyst High Target"].append("N/A - Grok API ready")
-            qual_port["Analyst Avg Target"].append("N/A - Grok API ready")
-            qual_port["Analyst Low Target"].append("N/A - Grok API ready")
-            qual_port["Analyst Rating"].append("N/A - Grok API ready")
-        st.dataframe(pd.DataFrame(qual_port), width="stretch", hide_index=True)
+    # ====================== GROK API QUALITATIVE ANALYSIS ======================
+    st.markdown("### 🔍 Grok-Powered Company & Moonshot Analysis")
+    st.caption("Grok will analyze each ticker using your moonshot (2X+) strategy and populate the tables below.")
+
+    if st.button("🔄 Refresh All Analysis with Grok API", type="primary"):
+        if not os.getenv("GROK_API_KEY"):
+            st.error("Grok API key not found. Please add it to st.secrets or environment variables.")
+        else:
+            with st.spinner("Calling Grok API for deep analysis... This may take 10–30 seconds per ticker."):
+                enriched_data = {}
+                all_tickers = list(set(portfolio_tickers + watchlist_tickers))
+                
+                for ticker in all_tickers:
+                    prompt = f"""You are an expert investment analyst for a moonshot-focused investment club seeking 2X+ returns.
+We are evaluating {ticker} as a potential high-conviction pick.
+
+Provide a structured assessment in the following exact format (use bullet points and short tables where helpful):
+
+**1. Company Overview**
+- Summary of business
+- Years publicly traded
+- What they do and core products/services
+
+**2. Industry & Competitive Position**
+- Industry
+- Major competitors
+- Differentiation and whether they are best-of-breed
+
+**3. Financial Snapshot**
+- Current market cap and price
+- Recent revenue growth and profitability
+- Expected revenue/profit in 12 and 24 months
+- Key cash flow metrics (levered/unlevered)
+
+**4. Analyst Views**
+- Number of analysts covering
+- Buy/Hold/Sell breakdown
+- Average, High, and Low 12-month price targets
+
+**5. Moonshot Assessment (2X+ Potential)**
+- Key catalysts for significant upside
+- Major risks and concerns
+- Recommended entry point or whether to wait
+- Overall recommendation and confidence
+
+Be concise, data-driven, and honest about both upside and downside."""
+
+                    try:
+                        response = supabase.functions.invoke(
+                            "grok-analyze",
+                            {"ticker": ticker, "prompt": prompt}
+                        )
+                        enriched_data[ticker] = response.get("text", "Analysis unavailable")
+                    except Exception as e:
+                        enriched_data[ticker] = f"Error calling Grok: {str(e)}"
+
+                st.session_state.grok_analysis = enriched_data
+                st.success("✅ Grok analysis completed for all tickers!")
+                st.rerun()
+
+    # Display Enriched Qualitative Tables
+    if "grok_analysis" in st.session_state and st.session_state.grok_analysis:
+        st.markdown("#### Portfolio Holdings – Grok Analysis")
+        if portfolio_tickers:
+            for ticker in portfolio_tickers:
+                if ticker in st.session_state.grok_analysis:
+                    with st.expander(f"🔍 {ticker} – Grok Moonshot Assessment", expanded=False):
+                        st.markdown(st.session_state.grok_analysis[ticker])
+
+        st.markdown("#### Watchlist – Grok Analysis")
+        if watchlist_tickers:
+            for ticker in watchlist_tickers:
+                if ticker in st.session_state.grok_analysis:
+                    with st.expander(f"🔍 {ticker} – Grok Moonshot Assessment", expanded=False):
+                        st.markdown(st.session_state.grok_analysis[ticker])
     else:
-        st.info("No portfolio holdings yet for qualitative analysis.")
+        st.info("Click 'Refresh All Analysis with Grok API' above to generate detailed qualitative insights, analyst targets, catalysts, and moonshot recommendations using Grok.")
 
-    # === Dynamic Qualitative Analysis - Watchlist ===
-    if watchlist_tickers:
-        st.markdown("### Watchlist Qualitative Analysis")
-        qual_watch = {
-            "Ticker": watchlist_tickers,
-            "Company Name": [],
-            "Industry": [],
-            "Sub-Industry": [],
-            "Description": [],
-            "Founded": [],
-            "Revenue Growth": [],
-            "Gross Margin": [],
-            "Net Margin": [],
-            "Cash Flow": [],
-            "Major Competitors": [],
-            "Best of Breed?": [],
-            "Major News": [],
-            "Catalysts": [],
-            "Industry Growth": [],
-            "Current Price": [],
-            "Analyst High Target": [],
-            "Analyst Avg Target": [],
-            "Analyst Low Target": [],
-            "Analyst Rating": []
-        }
-        for ticker in watchlist_tickers:
-            qual_watch["Company Name"].append("Dynamic Company Name")
-            qual_watch["Industry"].append("Dynamic Industry")
-            qual_watch["Sub-Industry"].append("Dynamic Sub-Industry")
-            qual_watch["Description"].append("Dynamic business description - ready for Grok enrichment")
-            qual_watch["Founded"].append("N/A")
-            qual_watch["Revenue Growth"].append("N/A")
-            qual_watch["Gross Margin"].append("N/A")
-            qual_watch["Net Margin"].append("N/A")
-            qual_watch["Cash Flow"].append("N/A")
-            qual_watch["Major Competitors"].append("N/A")
-            qual_watch["Best of Breed?"].append("N/A")
-            qual_watch["Major News"].append("N/A")
-            qual_watch["Catalysts"].append("N/A")
-            qual_watch["Industry Growth"].append("N/A")
-            qual_watch["Current Price"].append(f"${get_price(ticker):,.2f}")
-            qual_watch["Analyst High Target"].append("N/A - Grok API ready")
-            qual_watch["Analyst Avg Target"].append("N/A - Grok API ready")
-            qual_watch["Analyst Low Target"].append("N/A - Grok API ready")
-            qual_watch["Analyst Rating"].append("N/A - Grok API ready")
-        st.dataframe(pd.DataFrame(qual_watch), width="stretch", hide_index=True)
-
-    st.markdown("### Simple Combined Confluence Strategy (Easy-to-Follow Rules)")
-    st.markdown("**Confluence Score (0–5)** — Higher score = stronger signal.")
-
-    st.info("✅ Columns are now fully dynamic and ready for Grok API integration to populate real-time company data, analyst targets, ratings, news, and catalysts for any ticker (portfolio or watchlist).")
+    st.markdown("### Technical + Qualitative Confluence")
+    st.caption("Combine technical signals from the tables above with Grok’s qualitative assessment for high-conviction decisions.")
 
 # TAB 7: MEETING SCHEDULER – Full persistence for everything
 with tab7:
