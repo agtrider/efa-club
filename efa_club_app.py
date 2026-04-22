@@ -5,17 +5,42 @@ from datetime import datetime, timedelta
 from collections import defaultdict, Counter
 import numpy as np
 
-# ====================== SUPABASE CONFIG ======================
+# ====================== PAGE CONFIG - WIDE LAYOUT + FIRE ICON ======================
+st.set_page_config(
+    page_title="EFA Investment Club",
+    layout="wide",           # This removes the huge blank space / centered layout
+    page_icon="🔥",
+    initial_sidebar_state="expanded"
+)
+
+# ====================== SUPABASE CONFIG (using Secret Key to bypass RLS) ======================
 SUPABASE_URL = "https://lijblwhwfrbwplvwlxil.supabase.co"
-SUPABASE_ANON_KEY = "sb_publishable_DWo6ZggkTgSXhvaZsmyk3Q_VOUlzRMx"
+SUPABASE_SERVICE_ROLE_KEY = st.secrets.get("SUPABASE_SERVICE_ROLE_KEY")
+if not SUPABASE_SERVICE_ROLE_KEY:
+    st.error("SUPABASE_SERVICE_ROLE_KEY not found in secrets.toml")
+    st.stop()
 try:
     from supabase import create_client, Client
-    supabase: Client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
+    supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 except ImportError:
     st.error("Please install supabase: pip install supabase")
     st.stop()
+except Exception as e:
+    st.error(f"Failed to connect to Supabase: {e}")
+    st.stop()
 
-st.set_page_config(page_title="EFA Investment Club", layout="wide", page_icon="🔥")
+# ====================== GROK API CLIENT ======================
+from openai import OpenAI
+
+if "GROK_API_KEY" in st.secrets and st.secrets["GROK_API_KEY"]:
+    client = OpenAI(
+        api_key=st.secrets["GROK_API_KEY"],
+        base_url="https://api.x.ai/v1"
+    )
+    st.success("✅ Grok API client initialized")
+else:
+    client = None
+    st.warning("⚠️ Grok API key not found in secrets.toml. Grok analysis will not work.")
 
 # ====================== MEMBER LOGIN SYSTEM ======================
 if "logged_in" not in st.session_state:
@@ -160,7 +185,7 @@ def save_watchlist(watchlist):
     except:
         pass
 
-# Scheduler helpers (unchanged)
+# Scheduler helpers
 def load_polls():
     try:
         response = supabase.table("club_data").select("*").eq("id", 1).execute()
@@ -255,93 +280,117 @@ def get_technical_indicators(ticker):
             return None
         df = df.dropna()
         delta = df['Close'].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(14).mean()
+        gain = delta.where(delta > 0, 0).rolling(14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
         rs = gain / loss
         rsi = 100 - (100 / (1 + rs))
-        sma50 = df['Close'].rolling(50).mean().iloc[-1]
-        sma200 = df['Close'].rolling(200).mean().iloc[-1]
-        bb_mid = df['Close'].rolling(20).mean()
-        bb_std = df['Close'].rolling(20).std()
-        bb_upper = bb_mid + 2 * bb_std
-        bb_lower = bb_mid - 2 * bb_std
+        sma50 = df['Close'].rolling(50).mean().iloc[-1] if len(df) > 50 else None
+        sma200 = df['Close'].rolling(200).mean().iloc[-1] if len(df) > 200 else None
+        bb_mid = df['Close'].rolling(20).mean().iloc[-1] if len(df) > 20 else None
+        bb_std = df['Close'].rolling(20).std().iloc[-1] if len(df) > 20 else None
+        bb_upper = bb_mid + 2 * bb_std if bb_mid is not None and bb_std is not None else None
+        bb_lower = bb_mid - 2 * bb_std if bb_mid is not None and bb_std is not None else None
         return {
-            "price": float(df['Close'].iloc[-1]),
-            "rsi": float(rsi.iloc[-1]),
-            "sma50": float(sma50),
-            "sma200": float(sma200),
-            "bb_upper": float(bb_upper.iloc[-1]),
-            "bb_lower": float(bb_lower.iloc[-1]),
-            "bb_mid": float(bb_mid.iloc[-1])
+            "price": float(df['Close'].iloc[-1]) if not df['Close'].empty else 0.0,
+            "rsi": float(rsi.iloc[-1]) if len(rsi) > 0 and not pd.isna(rsi.iloc[-1]) else None,
+            "sma50": float(sma50) if sma50 is not None and not pd.isna(sma50) else None,
+            "sma200": float(sma200) if sma200 is not None and not pd.isna(sma200) else None,
+            "bb_upper": float(bb_upper) if bb_upper is not None and not pd.isna(bb_upper) else None,
+            "bb_lower": float(bb_lower) if bb_lower is not None and not pd.isna(bb_lower) else None,
+            "bb_mid": float(bb_mid) if bb_mid is not None and not pd.isna(bb_mid) else None
         }
-    except:
+    except Exception:
         return None
 
-# ====================== INITIAL LOAD & PERMANENT $250 SEED ======================
+# ====================== INITIAL LOAD ======================
 members = load_members()
 transactions = load_transactions()
-if not any(t.get("type") == "Opening Deposit" for t in transactions):
-    members_list = [m["name"] for m in members]
-    seed_alloc = {name: 25.0 if name != "Ray Gilkes" else 0.0 for name in members_list}
-    seed_txn = {
-        "date": "2026-04-01",
-        "type": "Opening Deposit",
-        "ticker": "CASH",
-        "quantity": 0,
-        "price": 0,
-        "amount": 250.0,
-        "commission": 0,
-        "notes": "Initial $250 opening deposit (PROTECTED)",
-        "allocations": seed_alloc
-    }
-    supabase.table("transactions").insert(seed_txn).execute()
-    transactions = load_transactions()
-    for m in members:
-        m["total_contributed"] = seed_alloc.get(m["name"], 0.0)
-    save_members(members)
-
-data = {"members": members, "transactions": transactions}
+data = {
+    "members": members,
+    "transactions": transactions
+}
 if "watchlist" not in st.session_state:
     st.session_state.watchlist = load_watchlist()
 
+st.success("✅ Data loaded from Supabase. Upload Seed Deposit.csv first (12/31/2025), then your main transactions CSV using Append.")
+
 # ====================== AUTO-ALLOCATION ======================
 def auto_allocate_transactions():
+    """Clean allocation rules as requested:
+    - Any deposit (including seed 'opening deposit'): 
+        • 2025 or before 4/1/2026 → 10-way split (Ray = $0)
+        • 4/1 to 4/14/2026 → special $27,500 split from spreadsheet
+        • After 4/15/2026 → 1/11 equal
+    - Buys, Sells, Withdrawals, or anything else → ALWAYS 1/11 equal split
+    """
     members_list = [m["name"] for m in data["members"]]
+
     for txn in data["transactions"]:
-        if not txn.get("allocations"):
-            amount = float(txn.get("amount", 0))
-            if amount == 0:
-                continue
-            txn_type = str(txn.get("type", "")).lower()
-            txn_date_str = str(txn.get("date", "2026-04-15")).split(" ")[0]
-            try:
-                txn_date = datetime.strptime(txn_date_str, "%Y-%m-%d")
-            except:
-                txn_date = datetime(2026, 4, 15)
-            if txn_type == "opening deposit":
-                continue
-            if txn_date < datetime(2026, 4, 1):
-                alloc_amount = abs(amount) / 10
+        if txn.get("allocations"):  # Already allocated
+            continue
+
+        amount = abs(float(txn.get("amount", 0)))
+        if amount == 0:
+            continue
+
+        txn_type = str(txn.get("type", "")).lower()
+        date_str = str(txn.get("date", "")).strip()
+
+        # Flexible date parsing (handles 12/31/2025 and 2026-04-14 formats)
+        try:
+            if "/" in date_str:
+                txn_date = datetime.strptime(date_str, "%m/%d/%Y")
+            else:
+                txn_date = datetime.strptime(date_str, "%Y-%m-%d")
+        except:
+            txn_date = datetime(2026, 4, 15)  # safe fallback
+
+        # ==================== 1. DEPOSITS ====================
+        if any(word in txn_type for word in ["deposit", "opening", "electronic fund transfer"]):
+            if txn_date.year == 2025 or txn_date < datetime(2026, 4, 1):
+                # Seed deposit and any pre-4/1/2026 deposits: 10-way, Ray = $0
+                alloc_amount = amount / 10
                 txn["allocations"] = {name: alloc_amount if name != "Ray Gilkes" else 0.0 for name in members_list}
             elif datetime(2026, 4, 1) <= txn_date <= datetime(2026, 4, 14):
+                # Special $27,500 deposit split
                 txn["allocations"] = {
                     "Antonio Calderon": 0.0,
                     "Chris Koo": 0.0,
-                    "Josh Tafoya": abs(amount) / 11,
-                    "Jeff Gragert": abs(amount) / 11,
-                    "Nick Vigil": abs(amount) * 2 / 11,
-                    "Ray Gilkes": abs(amount) / 11,
-                    "Jose Calderon": abs(amount) / 11,
-                    "Chad Speegle": abs(amount) / 11,
-                    "Jadyn Tafoya": abs(amount) / 11,
-                    "Matt Newbill": abs(amount) * 2 / 11,
-                    "Mike Brooks": abs(amount) / 11
+                    "Josh Tafoya": amount / 11,
+                    "Jeff Gragert": amount / 11,
+                    "Nick Vigil": amount * 2 / 11,
+                    "Ray Gilkes": amount / 11,
+                    "Jose Calderon": amount / 11,
+                    "Chad Speegle": amount / 11,
+                    "Jadyn Tafoya": amount / 11,
+                    "Matt Newbill": amount * 2 / 11,
+                    "Mike Brooks": amount / 11
                 }
             else:
-                default = abs(amount) / 11
+                # Future deposits after 4/15/2026: 1/11
+                default = amount / 11
                 txn["allocations"] = {name: default for name in members_list}
+            continue
 
-auto_allocate_transactions()
+        # ==================== 2. EVERYTHING ELSE (Buys, Sells, Withdrawals) ====================
+        default = amount / 11
+        txn["allocations"] = {name: default for name in members_list}
+
+    # Save the updated allocations
+    save_transactions(data["transactions"])
+
+# ====================== HOLDINGS (moved early for correct layout) ======================
+df_txn = pd.DataFrame(data.get("transactions", []))
+buys = df_txn[df_txn.get("type", pd.Series([])).str.contains("Buy", na=False)]
+holdings = defaultdict(lambda: {"qty": 0.0, "cost_basis": 0.0})
+for _, row in buys.iterrows():
+    ticker = str(row.get("ticker", "CASH")).upper()
+    if ticker == "CASH":
+        continue
+    qty = float(row.get("quantity", 0))
+    cost = abs(float(row.get("amount", 0))) + abs(float(row.get("commission", 0)))
+    holdings[ticker]["qty"] += qty
+    holdings[ticker]["cost_basis"] += cost
 
 # ====================== DYNAMIC TOTALS ======================
 def calculate_dynamic_totals():
@@ -374,34 +423,19 @@ def calculate_dynamic_totals():
     return member_totals
 
 dynamic_totals = calculate_dynamic_totals()
-
 for m in data["members"]:
     name = m["name"]
     m["total_invested"] = dynamic_totals.get(name, {}).get("invested", 0.0)
     m["fees"] = dynamic_totals.get(name, {}).get("fees", 0.0)
     m["total_contributed"] = dynamic_totals.get(name, {}).get("contributed", m.get("total_contributed", 0.0))
-
 save_members(data["members"])
 
-# ====================== HOLDINGS ======================
-df_txn = pd.DataFrame(data["transactions"])
-buys = df_txn[df_txn.get("type", pd.Series([])).str.contains("Buy", na=False)]
-holdings = defaultdict(lambda: {"qty": 0.0, "cost_basis": 0.0})
-for _, row in buys.iterrows():
-    ticker = str(row.get("ticker", "CASH")).upper()
-    if ticker == "CASH": continue
-    qty = float(row.get("quantity", 0))
-    cost = abs(float(row.get("amount", 0))) + abs(float(row.get("commission", 0)))
-    holdings[ticker]["qty"] += qty
-    holdings[ticker]["cost_basis"] += cost
-
-# ====================== PORTFOLIO SUMMARY CALCULATIONS ======================
+# ====================== PORTFOLIO SUMMARY CALCULATIONS (safe version) ======================
 prices = {ticker: get_price(ticker) for ticker in holdings}
-
-total_market_value = sum(h["qty"] * prices.get(t, 0) for t, h in holdings.items())
+total_market_value = sum(h["qty"] * prices.get(t, 0.0) for t, h in holdings.items())
 total_cost_basis = sum(h["cost_basis"] for h in holdings.values())
-overall_return = ((total_market_value / total_cost_basis) - 1) * 100 if total_cost_basis > 0 else 0
-total_current_cash = sum(m["total_contributed"] - m.get("total_invested", 0.0) for m in data["members"])
+overall_return = ((total_market_value / total_cost_basis) - 1) * 100 if total_cost_basis > 0 else 0.0
+total_current_cash = sum(m.get("total_contributed", 0.0) - m.get("total_invested", 0.0) for m in data.get("members", []))
 
 # ====================== LAYOUT: BIBLE + PORTFOLIO SUMMARY ======================
 col_bible, col_summary = st.columns([3, 1])
@@ -426,13 +460,14 @@ with col_summary:
     """, unsafe_allow_html=True)
 
 # ====================== NEGATIVE BALANCE ALERT ======================
-negative_members = [m["name"] for m in data["members"] if (m.get("total_contributed", 0) - m.get("total_invested", 0)) < -0.01]
+negative_members = [m["name"] for m in data.get("members", [])
+                    if (m.get("total_contributed", 0) - m.get("total_invested", 0.0)) < -0.01]
 if negative_members:
-    st.error(f"⚠️ **NEGATIVE BALANCE ALERT**: {', '.join(negative_members)} ha{'s' if len(negative_members)==1 else 've'} gone negative.")
+    st.error(f"⚠️ **NEGATIVE BALANCE ALERT**: {', '.join(negative_members)} have gone negative.")
 
 # ====================== SIDEBAR ======================
 st.sidebar.header("📤 CSV Upload (IBKR)")
-uploaded_file = st.sidebar.file_uploader("Upload new IBKR Transactions CSV", type=["csv"])
+uploaded_file = st.sidebar.file_uploader("Upload new IBKR Transactions CSV", type=["csv"], key="csv_uploader")
 if uploaded_file is not None:
     try:
         text = uploaded_file.getvalue().decode('utf-8')
@@ -453,7 +488,7 @@ if uploaded_file is not None:
 
 if "pending_df" in st.session_state:
     col1, col2 = st.sidebar.columns(2)
-    if col1.button("Append to Existing Data"):
+    if col1.button("Append to Existing Data", key="append_btn"):
         new_txns = []
         for _, row in st.session_state.pending_df.iterrows():
             new_txns.append({
@@ -468,15 +503,14 @@ if "pending_df" in st.session_state:
                 "allocations": {}
             })
         data["transactions"].extend(new_txns)
-        auto_allocate_transactions()
         save_transactions(data["transactions"])
-        save_members(data["members"])
-        data["transactions"] = load_transactions()
+        st.sidebar.success(f"✅ Appended {len(new_txns)} transactions. Running allocation...")
         auto_allocate_transactions()
-        st.sidebar.success(f"✅ Appended! Total transactions: {len(data['transactions'])}")
+        data["transactions"] = load_transactions()
+        st.sidebar.success(f"✅ Total transactions now: {len(data['transactions'])}")
         del st.session_state.pending_df
         st.rerun()
-    if col2.button("Replace All Data", type="primary"):
+    if col2.button("Replace All Data", type="primary", key="replace_btn"):
         new_txns = []
         for _, row in st.session_state.pending_df.iterrows():
             new_txns.append({
@@ -490,22 +524,25 @@ if "pending_df" in st.session_state:
                 "notes": str(row.get("Description", "")),
                 "allocations": {}
             })
-        seed_txns = [t for t in data["transactions"] if t.get("type") == "Opening Deposit"]
-        data["transactions"] = seed_txns + new_txns
-        auto_allocate_transactions()
+        # Clear everything and only keep the new transactions (no seed protection for testing)
+        data["transactions"] = new_txns
         save_transactions(data["transactions"])
-        save_members(data["members"])
-        data["transactions"] = load_transactions()
+        st.sidebar.success(f"✅ Replaced with {len(new_txns)} transactions. Running allocation...")
         auto_allocate_transactions()
-        st.sidebar.success(f"✅ Replaced with {len(data['transactions'])} transactions (seed protected!)")
+        data["transactions"] = load_transactions()
+        st.sidebar.success(f"✅ Total transactions now: {len(data['transactions'])}")
         del st.session_state.pending_df
         st.rerun()
 
-if st.sidebar.button("🔄 Refresh Data from Supabase"):
+if st.sidebar.button("🔄 Refresh Data from Supabase", key="refresh_btn"):
     data["members"] = load_members()
     data["transactions"] = load_transactions()
     auto_allocate_transactions()
-    st.success("✅ Data refreshed")
+    st.success("✅ Data refreshed from Supabase")
+    st.rerun()
+
+if st.sidebar.button("Logout", key="logout_btn"):
+    st.session_state.logged_in = False
     st.rerun()
 
 # ====================== TABS ======================
@@ -617,7 +654,8 @@ with tab1:
 # TAB 2: Club Holdings with Live Prices + Historical Chart
 with tab2:
     st.subheader("Club Holdings with Live Prices")
-    prices = {ticker: get_price(ticker) for ticker in holdings}
+    # Use the already calculated prices from above to avoid re-computation and layout issues
+    pass
     rows = []
     total_qty = total_cost = total_market = total_unrealized = 0.0
     for ticker, h in holdings.items():
@@ -755,151 +793,152 @@ with tab4:
     else:
         st.info("No transactions yet.")
 
-# TAB 5: WATCHLIST (persistent)
+# TAB 5: WATCHLIST (fully dynamic, individual remove)
 with tab5:
     st.subheader("⭐ Watchlist")
-    st.caption("Add or remove items. Changes are saved permanently for all members.")
-    new_ticker = st.text_input("Add ticker to watchlist (e.g. AAPL)")
-    if st.button("Add to Watchlist"):
+    st.caption("Add or remove individual items. Changes are saved permanently for all members.")
+
+    # Add new ticker
+    new_ticker = st.text_input("Add ticker to watchlist (e.g. AAPL)", key="add_watch")
+    if st.button("Add to Watchlist", key="add_watch_btn"):
         ticker_upper = new_ticker.strip().upper()
         if ticker_upper and ticker_upper not in st.session_state.watchlist:
             st.session_state.watchlist.append(ticker_upper)
             save_watchlist(st.session_state.watchlist)
-            st.success(f"Added {ticker_upper}")
+            st.success(f"✅ Added {ticker_upper}")
             st.rerun()
-    if st.button("Clear Watchlist"):
+
+    # Display watchlist with individual remove buttons
+    if st.session_state.watchlist:
+        st.write("**Current Watchlist**")
+        for i, ticker in enumerate(st.session_state.watchlist[:]):
+            col1, col2 = st.columns([4, 1])
+            with col1:
+                st.write(f"• {ticker}")
+            with col2:
+                if st.button("Remove", key=f"remove_{i}"):
+                    st.session_state.watchlist.pop(i)
+                    save_watchlist(st.session_state.watchlist)
+                    st.success(f"✅ Removed {ticker}")
+                    st.rerun()
+    else:
+        st.info("Watchlist is empty. Add tickers above.")
+
+    if st.button("Clear Entire Watchlist", key="clear_watch"):
         st.session_state.watchlist = []
         save_watchlist([])
         st.success("Watchlist cleared")
         st.rerun()
-    st.dataframe(pd.DataFrame({"Watchlist Tickers": st.session_state.watchlist}), width="stretch", hide_index=True)
 
 # TAB 6: Advanced Technical Analysis + Grok-Powered Qualitative Analysis
 with tab6:
-    st.subheader("📉 Advanced Technical Analysis & Grok-Powered Insights")
-    st.caption("Technical indicators via yfinance • Deep qualitative + analyst analysis powered by Grok API")
+    st.subheader("📉 Advanced Technical Analysis & Grok Moonshot Insights")
+    st.caption("Technical indicators via yfinance • Deep qualitative, analyst, and moonshot (2X+) analysis powered by Grok")
 
     df_txn = pd.DataFrame(data["transactions"])
-    portfolio_tickers = [t.upper() for t in df_txn[df_txn.get("type", "").str.contains("Buy", na=False)]["ticker"].unique().tolist() if t and t.upper() != "CASH"]
+    if not df_txn.empty and "type" in df_txn.columns and "ticker" in df_txn.columns:
+        buy_mask = df_txn["type"].astype(str).str.contains("Buy", na=False)
+        portfolio_tickers = [t.upper() for t in df_txn[buy_mask]["ticker"].dropna().unique().tolist() if t and t.upper() != "CASH"]
+    else:
+        portfolio_tickers = []
+
     watchlist_tickers = st.session_state.get("watchlist", [])
 
-    # ====================== TECHNICAL ANALYSIS ======================
-    if portfolio_tickers:
-        st.markdown("### 📊 Portfolio Holdings – Technical Analysis")
-        rows = []
-        for ticker in portfolio_tickers:
+    # Technical Indicators
+    if portfolio_tickers or watchlist_tickers:
+        st.markdown("### 📊 Technical Indicators")
+        tech_rows = []
+        all_tickers = list(set(portfolio_tickers + watchlist_tickers))
+        for ticker in all_tickers:
             data_ind = get_technical_indicators(ticker)
             if data_ind:
-                rows.append({
+                tech_rows.append({
                     "Ticker": ticker,
-                    "Current Price": f"${data_ind['price']:,.2f}",
-                    "RSI (14)": f"{data_ind['rsi']:.1f}",
-                    "50-day SMA": f"${data_ind['sma50']:,.2f}",
-                    "200-day SMA": f"${data_ind['sma200']:,.2f}",
-                    "Bollinger Context": "Upper" if data_ind['price'] > data_ind['bb_upper'] else "Lower" if data_ind['price'] < data_ind['bb_lower'] else "Middle",
-                    "Recommendation": "Strong Buy" if data_ind['rsi'] < 30 else "Sell" if data_ind['rsi'] > 70 else "Hold"
+                    "Current Price": f"${data_ind.get('price', 0):,.2f}",
+                    "RSI (14)": f"{data_ind.get('rsi', 0):.1f}",
+                    "50-day SMA": f"${data_ind.get('sma50', 0):,.2f}",
+                    "200-day SMA": f"${data_ind.get('sma200', 0):,.2f}",
+                    "Bollinger Context": "Upper" if data_ind.get('price', 0) > data_ind.get('bb_upper', 0) else "Lower" if data_ind.get('price', 0) < data_ind.get('bb_lower', 0) else "Middle",
+                    "Recommendation": "Strong Buy" if data_ind.get('rsi', 50) < 30 else "Sell" if data_ind.get('rsi', 50) > 70 else "Hold"
                 })
-        if rows:
-            st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+        if tech_rows:
+            st.dataframe(pd.DataFrame(tech_rows), width="stretch", hide_index=True)
 
-    if watchlist_tickers:
-        st.markdown("### 📊 Watchlist – Technical Analysis")
-        rows = []
-        for ticker in watchlist_tickers:
-            data_ind = get_technical_indicators(ticker)
-            if data_ind:
-                rows.append({
-                    "Ticker": ticker,
-                    "Current Price": f"${data_ind['price']:,.2f}",
-                    "RSI (14)": f"{data_ind['rsi']:.1f}",
-                    "50-day SMA": f"${data_ind['sma50']:,.2f}",
-                    "200-day SMA": f"${data_ind['sma200']:,.2f}",
-                    "Bollinger Context": "Upper" if data_ind['price'] > data_ind['bb_upper'] else "Lower" if data_ind['price'] < data_ind['bb_lower'] else "Middle",
-                    "Recommendation": "Strong Buy" if data_ind['rsi'] < 30 else "Sell" if data_ind['rsi'] > 70 else "Hold"
-                })
-        if rows:
-            st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+    # Grok Analysis Section
+    st.markdown("### 🔍 Grok-Powered Moonshot Analysis (2X+ Focus)")
 
-    # ====================== GROK API QUALITATIVE ANALYSIS ======================
-    st.markdown("### 🔍 Grok-Powered Company & Moonshot Analysis")
-    st.caption("Grok will analyze each ticker using your moonshot (2X+) strategy and populate the tables below.")
+    if "grok_enriched" not in st.session_state:
+        st.session_state.grok_enriched = {}
 
-    if st.button("🔄 Refresh All Analysis with Grok API", type="primary"):
-        if not os.getenv("GROK_API_KEY"):
-            st.error("Grok API key not found. Please add it to st.secrets or environment variables.")
+    all_tickers = list(set(portfolio_tickers + watchlist_tickers))
+    selected_for_refresh = st.multiselect("Select tickers to analyze / refresh", all_tickers, default=all_tickers)
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        if st.button("🔄 Refresh All Tickers", type="primary"):
+            selected_for_refresh = all_tickers
+    with col_b:
+        if st.button("🔄 Refresh Selected Only"):
+            pass
+
+    if selected_for_refresh and st.button("Generate Grok Analysis for Selected Tickers", type="primary"):
+        if client is None:
+            st.error("Grok client not initialized. Check your secrets.toml file.")
         else:
-            with st.spinner("Calling Grok API for deep analysis... This may take 10–30 seconds per ticker."):
-                enriched_data = {}
-                all_tickers = list(set(portfolio_tickers + watchlist_tickers))
-                
-                for ticker in all_tickers:
-                    prompt = f"""You are an expert investment analyst for a moonshot-focused investment club seeking 2X+ returns.
-We are evaluating {ticker} as a potential high-conviction pick.
+            with st.spinner("Calling Grok API... (this can take 20-60 seconds)"):
+                for ticker in selected_for_refresh:
+                    prompt = f"""You are an expert investment analyst for a moonshot-focused club seeking 2X+ returns.
 
-Provide a structured assessment in the following exact format (use bullet points and short tables where helpful):
+Analyze ticker **{ticker}** thoroughly and structure your response with these clear sections:
 
 **1. Company Overview**
-- Summary of business
-- Years publicly traded
-- What they do and core products/services
+- Business summary and what they do
+- Industry and major competitors
+- Key differentiation and whether they are best-of-breed
 
-**2. Industry & Competitive Position**
-- Industry
-- Major competitors
-- Differentiation and whether they are best-of-breed
-
-**3. Financial Snapshot**
-- Current market cap and price
-- Recent revenue growth and profitability
+**2. Financial Snapshot**
+- Current price and market cap
+- Recent revenue growth and profitability status
 - Expected revenue/profit in 12 and 24 months
-- Key cash flow metrics (levered/unlevered)
+- Key cash flow metrics
 
-**4. Analyst Views**
-- Number of analysts covering
-- Buy/Hold/Sell breakdown
+**3. Analyst Views**
+- Number of analysts covering the stock
+- Buy / Hold / Sell breakdown
 - Average, High, and Low 12-month price targets
 
-**5. Moonshot Assessment (2X+ Potential)**
-- Key catalysts for significant upside
+**4. Moonshot Assessment (2X+ Potential)**
+- Major catalysts for significant upside
 - Major risks and concerns
-- Recommended entry point or whether to wait
-- Overall recommendation and confidence
+- Recommended entry point or whether we should wait
+- Overall recommendation and confidence for our club
 
-Be concise, data-driven, and honest about both upside and downside."""
+Be concise, honest, and data-driven. Use bullet points and short paragraphs."""
 
                     try:
-                        response = supabase.functions.invoke(
-                            "grok-analyze",
-                            {"ticker": ticker, "prompt": prompt}
+                        response = client.chat.completions.create(
+                            model="grok-4-1-fast",   # Fast & cost-effective for analysis
+                            messages=[{"role": "user", "content": prompt}],
+                            temperature=0.7,
+                            max_tokens=1400
                         )
-                        enriched_data[ticker] = response.get("text", "Analysis unavailable")
+                        st.session_state.grok_enriched[ticker] = response.choices[0].message.content
+                        usage = response.usage
+                        st.info(f"✅ {ticker}: ~{usage.prompt_tokens + usage.completion_tokens} tokens used")
                     except Exception as e:
-                        enriched_data[ticker] = f"Error calling Grok: {str(e)}"
-
-                st.session_state.grok_analysis = enriched_data
-                st.success("✅ Grok analysis completed for all tickers!")
+                        st.session_state.grok_enriched[ticker] = f"❌ Grok API error: {str(e)}"
+                st.success("✅ Grok analysis completed!")
                 st.rerun()
 
-    # Display Enriched Qualitative Tables
-    if "grok_analysis" in st.session_state and st.session_state.grok_analysis:
-        st.markdown("#### Portfolio Holdings – Grok Analysis")
-        if portfolio_tickers:
-            for ticker in portfolio_tickers:
-                if ticker in st.session_state.grok_analysis:
-                    with st.expander(f"🔍 {ticker} – Grok Moonshot Assessment", expanded=False):
-                        st.markdown(st.session_state.grok_analysis[ticker])
+    # Display results
+    if st.session_state.grok_enriched:
+        st.markdown("#### Saved Grok Moonshot Analysis")
+        for ticker in all_tickers:
+            if ticker in st.session_state.grok_enriched:
+                with st.expander(f"🔍 {ticker} — Grok Assessment", expanded=False):
+                    st.markdown(st.session_state.grok_enriched[ticker])
 
-        st.markdown("#### Watchlist – Grok Analysis")
-        if watchlist_tickers:
-            for ticker in watchlist_tickers:
-                if ticker in st.session_state.grok_analysis:
-                    with st.expander(f"🔍 {ticker} – Grok Moonshot Assessment", expanded=False):
-                        st.markdown(st.session_state.grok_analysis[ticker])
-    else:
-        st.info("Click 'Refresh All Analysis with Grok API' above to generate detailed qualitative insights, analyst targets, catalysts, and moonshot recommendations using Grok.")
-
-    st.markdown("### Technical + Qualitative Confluence")
-    st.caption("Combine technical signals from the tables above with Grok’s qualitative assessment for high-conviction decisions.")
+    st.caption("Grok analysis persists in this session. Use buttons above to refresh.")
 
 # TAB 7: MEETING SCHEDULER – Full persistence for everything
 with tab7:
@@ -926,11 +965,9 @@ with tab7:
         proposed_times = st.multiselect("Available times (7:30 PM CST default)",
                                       ["7:30 PM CST", "8:00 PM CST", "8:30 PM CST"],
                                       default=["7:30 PM CST"])
-        
         if st.button("Create Poll & Generate Email"):
             poll_date = datetime.now().strftime("%Y-%m-%d")
             due_date = (datetime.now() + timedelta(days=5)).strftime("%Y-%m-%d")
-            
             new_poll = {
                 "id": len(st.session_state.meeting_proposals) + 1,
                 "week_start": week_start.strftime("%Y-%m-%d"),
@@ -940,14 +977,12 @@ with tab7:
             }
             st.session_state.meeting_proposals.append(new_poll)
             save_polls(st.session_state.meeting_proposals)
-            
             poll_email = f"""Subject: EFA Investment Club - Availability Poll Open
 Hello Team,
 Antonio has initiated a poll to schedule our next 1-hour meeting the week of {week_start.strftime('%B %d')} – {week_end.strftime('%B %d, %Y')}.
 This request was created on {poll_date}. Please log into the EFA Club site and provide your availability **by {due_date}**.
 Thank you!
 – EFA Investment Club"""
-            
             st.session_state.poll_email_text = poll_email
             st.success("✅ Poll created and saved!")
             st.rerun()
@@ -976,7 +1011,6 @@ Thank you!
                 st.write(f"**Responded ({len(responded)})**: {', '.join(responded) if responded else 'None yet'}")
                 if pending:
                     st.write(f"**Still pending ({len(pending)})**: {', '.join(pending)}")
-                
                 poll_selections = [s for selections in st.session_state.availability_responses.values() for s in selections if any(d in s for d in [poll['week_start'], poll['week_end']])]
                 if poll_selections:
                     top_slots = Counter(poll_selections).most_common(3)
@@ -989,7 +1023,6 @@ Thank you!
     if st.session_state.is_admin:
         final_date = st.date_input("Meeting date", datetime.today() + timedelta(days=10), key="finalize_date")
         final_time = st.selectbox("Meeting time", ["7:30 PM CST", "8:00 PM CST", "8:30 PM CST"], key="finalize_time")
-        
         if st.button("Set Meeting & Generate Email"):
             final_email = f"""Subject: EFA Investment Club Meeting Confirmed
 Thank you everyone for providing availability.
@@ -1001,7 +1034,6 @@ We will need nearly everyone for the first meeting of the quarter to reach conse
 See you then!
 – EFA Investment Club"""
             st.session_state.final_email_text = final_email
-            
             new_meeting = {
                 "id": len(st.session_state.finalized_meetings) + 1,
                 "date": final_date.strftime('%Y-%m-%d'),
@@ -1020,7 +1052,6 @@ See you then!
         for idx, meeting in enumerate(st.session_state.finalized_meetings[:]):
             with st.expander(f"✅ {meeting['date']} at {meeting['time']}", expanded=False):
                 st.write(meeting.get('notes', 'No notes'))
-                
                 col1, col2 = st.columns(2)
                 with col1:
                     if st.button("Change this meeting", key=f"change_meet_{idx}"):
@@ -1031,9 +1062,5 @@ See you then!
                         save_finalized_meetings(st.session_state.finalized_meetings)
                         st.success("✅ Meeting cancelled and removed!")
                         st.rerun()
-
-if st.sidebar.button("Logout"):
-    st.session_state.logged_in = False
-    st.rerun()
 
 st.caption("✅ All scheduler data (polls + availability + finalized meetings) fully persists in Supabase")
