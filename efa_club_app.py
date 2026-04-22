@@ -830,7 +830,7 @@ with tab5:
         st.success("Watchlist cleared")
         st.rerun()
 
-# TAB 6: Advanced Technical Analysis + Grok Moonshot Insights (Persistent)
+# TAB 6: Advanced Technical Analysis + Grok Moonshot Insights (Persistent History)
 with tab6:
     st.subheader("📉 Advanced Technical Analysis & Grok Moonshot Insights")
     st.caption("Real-time fundamentals & technicals from yfinance • Persistent Grok qualitative analysis stored in Supabase")
@@ -879,7 +879,7 @@ with tab6:
     # ====================== PERSISTENT GROK ANALYSIS ======================
     st.markdown("### 🔍 Grok Moonshot Qualitative Analysis")
 
-    # Load saved analyses
+    # Load saved analyses from Supabase
     if "grok_analyses" not in st.session_state:
         try:
             response = supabase.table("club_data").select("*").eq("id", 1).execute()
@@ -888,7 +888,7 @@ with tab6:
         except:
             st.session_state.grok_analyses = []
 
-    selected_for_refresh = st.multiselect("Select tickers to refresh", all_tickers, default=all_tickers[:3])  # default first 3
+    selected_for_refresh = st.multiselect("Select tickers to refresh", all_tickers, default=all_tickers[:3])
 
     col_a, col_b = st.columns(2)
     with col_a:
@@ -939,27 +939,24 @@ Be concise and use bullet points."""
                     # Save to Supabase
                     try:
                         current = supabase.table("club_data").select("*").eq("id", 1).execute()
-                        if current.data:
-                            data_dict = current.data[0]["data"]
-                        else:
-                            data_dict = {}
+                        data_dict = current.data[0]["data"] if current.data else {}
                         data_dict["grok_analyses"] = st.session_state.grok_analyses
                         supabase.table("club_data").upsert({"id": 1, "data": data_dict}).execute()
-                        st.success("✅ Analyses saved persistently to Supabase!")
-                    except Exception as save_e:
-                        st.warning(f"Saved in session only. Error saving: {save_e}")
+                        st.success("✅ Saved to Supabase!")
+                    except:
+                        st.warning("Saved in session only.")
                     st.rerun()
 
-    # Display History (newest first)
+    # Display History (like Meeting Scheduler)
     if st.session_state.grok_analyses:
-        st.markdown("#### 📜 Grok Analysis History (newest first)")
+        st.markdown("#### 📜 Grok Analysis History")
         for entry in sorted(st.session_state.grok_analyses, key=lambda x: x.get("timestamp", ""), reverse=True):
-            with st.expander(f"🔍 {entry['ticker']} — {entry.get('timestamp', 'Unknown')}"):
+            with st.expander(f"🔍 {entry['ticker']} — {entry.get('timestamp', 'Unknown date')}"):
                 st.markdown(entry["analysis"])
     else:
         st.info("No Grok analyses saved yet. Select tickers above and click 'Refresh Selected Tickers' to start the log.")
 
-    st.caption("Fundamentals pulled from yfinance (free) • Grok used only for qualitative insights • All analyses saved in Supabase")
+    st.caption("Fundamentals from yfinance (free) • Grok used only for qualitative insights • All analyses saved persistently in Supabase")
 
 # TAB 7: MEETING SCHEDULER – Full persistence for everything
 with tab7:
