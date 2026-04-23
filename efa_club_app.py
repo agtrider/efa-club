@@ -854,7 +854,7 @@ with tab6:
 
     all_tickers = list(dict.fromkeys(portfolio_tickers + watchlist_tickers))
 
-    # Debug line - remove after confirmed working
+    # Debug line - remove after it works in production
     st.caption(f"✅ Portfolio from Tab 2: {portfolio_tickers} | Watchlist: {watchlist_tickers}")
 
     # ====================== YFINANCE FUNDAMENTALS ======================
