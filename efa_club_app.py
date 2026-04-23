@@ -824,6 +824,14 @@ with tab5:
     else:
         st.info("Watchlist is empty. Add tickers above.")
 
+    # Admin-only full clear from Supabase
+    if st.session_state.is_admin:
+        if st.button("🗑️ ADMIN: Clear Entire Watchlist from Supabase", type="secondary"):
+            st.session_state.watchlist = []
+            save_watchlist([])
+            st.success("✅ Watchlist completely cleared from Supabase")
+            st.rerun()
+
     if st.button("Clear Entire Watchlist", key="clear_watch"):
         st.session_state.watchlist = []
         save_watchlist([])
