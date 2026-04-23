@@ -830,7 +830,7 @@ with tab5:
         st.success("Watchlist cleared")
         st.rerun()
 
-# TAB 6: Advanced Technical Analysis & Grok Moonshot Insights (V5 - Persistent)
+# TAB 6: Advanced Technical Analysis & Grok Moonshot Insights (V5 - Bifurcated)
 with tab6:
     st.subheader("📉 Advanced Technical Analysis & Grok Moonshot Insights")
     st.caption("Real-time fundamentals from yfinance • Persistent Grok qualitative analysis stored in Supabase")
@@ -846,19 +846,23 @@ with tab6:
     watchlist_tickers = st.session_state.get("watchlist", [])
     all_tickers = list(dict.fromkeys(portfolio_tickers + watchlist_tickers))
 
-    # ====================== YFINANCE FUNDAMENTALS TABLE (Omnipresent) ======================
+    # ====================== YFINANCE FUNDAMENTALS (Robust) ======================
     @st.cache_data(ttl=300)
     def get_fundamentals(ticker):
         try:
             stock = yf.Ticker(ticker)
             info = stock.info
             hist = stock.history(period="1y")
+
+            price = info.get('currentPrice') or info.get('regularMarketPrice') or info.get('previousClose') or 0
+            market_cap = info.get('marketCap') or 0
+
             return {
                 "Ticker": ticker,
-                "Company": info.get("longName", ticker),
-                "Industry": info.get("industry", "N/A"),
-                "Current Price": f"${info.get('currentPrice', info.get('regularMarketPrice', 0)):.2f}",
-                "Market Cap": f"${info.get('marketCap', 0)/1e9:.2f}B" if info.get('marketCap') else "N/A",
+                "Company": info.get("longName", info.get("shortName", ticker)),
+                "Industry": info.get("industry", info.get("category", "N/A")),
+                "Current Price": f"${price:.2f}",
+                "Market Cap": f"${market_cap/1e9:.2f}B" if market_cap else "N/A",
                 "50d SMA": f"${info.get('fiftyDayAverage', 0):.2f}",
                 "200d SMA": f"${info.get('twoHundredDayAverage', 0):.2f}",
                 "YoY %": f"{((hist['Close'].iloc[-1] / hist['Close'].iloc[0]) - 1)*100:.1f}%" if not hist.empty else "N/A",
@@ -869,25 +873,33 @@ with tab6:
                 "FCF (B)": f"${info.get('freeCashflow', 0)/1e9:.2f}" if info.get('freeCashflow') else "N/A",
             }
         except:
-            return {"Ticker": ticker, "Company": "Error loading data"}
+            return {"Ticker": ticker, "Company": "Error loading data", "Industry": "N/A"}
 
+    # Bifurcated Table Display
     if all_tickers:
         st.markdown("### 📊 Fundamentals & Technicals (from yfinance)")
-        rows = [get_fundamentals(t) for t in all_tickers]
-        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+
+        # Portfolio Holdings (Top)
+        if portfolio_tickers:
+            st.markdown("#### Portfolio Holdings")
+            rows = [get_fundamentals(t) for t in portfolio_tickers]
+            st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+
+        # Watchlist (Bottom)
+        if watchlist_tickers:
+            st.markdown("#### Watchlist")
+            rows = [get_fundamentals(t) for t in watchlist_tickers]
+            st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
     # ====================== PERSISTENT GROK ANALYSIS ======================
     st.markdown("### 🔍 Grok Moonshot Qualitative Analysis")
 
-    # Robust load from Supabase
+    # Load saved analyses
     if "grok_analyses" not in st.session_state:
         try:
             response = supabase.table("club_data").select("*").eq("id", 1).execute()
-            if response.data and len(response.data) > 0:
-                current_data = response.data[0]["data"]
-                st.session_state.grok_analyses = current_data.get("grok_analyses", [])
-            else:
-                st.session_state.grok_analyses = []
+            current_data = response.data[0]["data"] if response.data else {}
+            st.session_state.grok_analyses = current_data.get("grok_analyses", [])
         except:
             st.session_state.grok_analyses = []
 
@@ -933,7 +945,6 @@ Be concise and use bullet points."""
                                 "ticker": ticker,
                                 "analysis": response.choices[0].message.content
                             }
-                            # Keep only latest per ticker
                             st.session_state.grok_analyses = [a for a in st.session_state.grok_analyses if a["ticker"] != ticker]
                             st.session_state.grok_analyses.append(new_entry)
                         except Exception as e:
@@ -950,7 +961,7 @@ Be concise and use bullet points."""
                         st.warning("Saved in session only.")
                     st.rerun()
 
-    # Display History - Meeting Scheduler Style
+    # Display Grok History
     if st.session_state.grok_analyses:
         st.markdown("#### 📜 Grok Analysis History")
         for entry in sorted(st.session_state.grok_analyses, key=lambda x: x.get("timestamp", ""), reverse=True):
@@ -964,13 +975,16 @@ Be concise and use bullet points."""
 # TAB 7: MEETING SCHEDULER – Full persistence for everything
 with tab7:
     st.subheader("📅 Meeting Scheduler")
-    st.caption("All data (polls, availability, scheduled meetings) persists in Supabase")
+    st.caption("All data (polls, availability, finalized meetings) persists in Supabase")
+
+    # Robust loading at the start of the tab
     if "meeting_proposals" not in st.session_state:
         st.session_state.meeting_proposals = load_polls()
     if "availability_responses" not in st.session_state:
         st.session_state.availability_responses = load_availability_responses()
     if "finalized_meetings" not in st.session_state:
         st.session_state.finalized_meetings = load_finalized_meetings()
+
     if "poll_email_text" not in st.session_state:
         st.session_state.poll_email_text = ""
     if "final_email_text" not in st.session_state:
@@ -979,6 +993,7 @@ with tab7:
         st.session_state.change_email_text = ""
     if "cancel_email_text" not in st.session_state:
         st.session_state.cancel_email_text = ""
+
     if st.session_state.is_admin:
         st.markdown("### Admin: Create New Poll")
         week_start = st.date_input("Week starting date", datetime.today() + timedelta(days=7))
@@ -1007,9 +1022,11 @@ Thank you!
             st.session_state.poll_email_text = poll_email
             st.success("✅ Poll created and saved!")
             st.rerun()
+
     if st.session_state.poll_email_text:
         st.text_area("📧 Poll Email – Click inside, Ctrl+A, then Copy",
                      st.session_state.poll_email_text, height=180)
+
     if st.session_state.meeting_proposals:
         st.markdown("### Current Availability Polls")
         for i, poll in enumerate(st.session_state.meeting_proposals):
@@ -1040,6 +1057,7 @@ Thank you!
                         st.write(f"• {slot} — **{count}** members available")
                 else:
                     st.info("No availability submitted yet for this poll.")
+
     st.markdown("### Finalize / Change / Cancel Meeting")
     if st.session_state.is_admin:
         final_date = st.date_input("Meeting date", datetime.today() + timedelta(days=10), key="finalize_date")
@@ -1065,9 +1083,11 @@ See you then!
             save_finalized_meetings(st.session_state.finalized_meetings)
             st.success("✅ Meeting set and saved to Supabase!")
             st.rerun()
+
     if st.session_state.final_email_text:
         st.text_area("📧 Final Meeting Email – Click inside, Ctrl+A, then Copy",
                      st.session_state.final_email_text, height=200)
+
     if st.session_state.finalized_meetings:
         st.markdown("### Scheduled Meetings")
         for idx, meeting in enumerate(st.session_state.finalized_meetings[:]):
@@ -1084,4 +1104,4 @@ See you then!
                         st.success("✅ Meeting cancelled and removed!")
                         st.rerun()
 
-st.caption("✅ All scheduler data (polls + availability + finalized meetings) fully persists in Supabase")
+    st.caption("✅ All scheduler data (polls + availability + finalized meetings) fully persists in Supabase")
