@@ -846,16 +846,16 @@ with tab6:
     st.subheader("📉 Advanced Technical Analysis & Grok Moonshot Insights")
     st.caption("Real-time fundamentals from yfinance • Persistent Grok qualitative analysis")
 
-        # ====================== GET TICKERS - DIRECT LINK TO TAB 2 (Path C) ======================
-    # Use the exact same `holdings` dict that Tab 2 uses successfully
+    # ====================== GET TICKERS - DIRECT LINK TO TAB 2 ======================
+    # Use the exact same holdings dict that Tab 2 builds successfully
     portfolio_tickers = [ticker for ticker in holdings.keys() if ticker != "CASH"]
 
     watchlist_tickers = st.session_state.get("watchlist", [])
 
     all_tickers = list(dict.fromkeys(portfolio_tickers + watchlist_tickers))
 
-    # Debug (remove this line once you confirm it works)
-    st.caption(f"✅ Portfolio tickers from Tab 2: {portfolio_tickers} | Watchlist: {watchlist_tickers}")
+    # Debug line - remove after confirmed working
+    st.caption(f"✅ Portfolio from Tab 2: {portfolio_tickers} | Watchlist: {watchlist_tickers}")
 
     # ====================== YFINANCE FUNDAMENTALS ======================
     @st.cache_data(ttl=300)
@@ -962,9 +962,7 @@ Analyze ticker **{ticker}** and return a structured summary with these exact fie
     # Bifurcated Grok Qualitative Summary Table
     if st.session_state.grok_analyses:
         latest = {entry["ticker"]: entry for entry in st.session_state.grok_analyses}
-
         st.markdown("### 📋 Grok Qualitative Analysis Summary (Latest)")
-
         if portfolio_tickers:
             st.markdown("#### Portfolio Holdings")
             rows = []
@@ -976,7 +974,6 @@ Analyze ticker **{ticker}** and return a structured summary with these exact fie
                     "Status": "✅ Analyzed" if entry else "⚠️ Needs Analysis"
                 })
             st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
-
         if watchlist_tickers:
             st.markdown("#### Watchlist")
             rows = []
