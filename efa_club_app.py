@@ -793,7 +793,7 @@ with tab4:
     else:
         st.info("No transactions yet.")
 
-# TAB 5: WATCHLIST (fully dynamic, individual remove)
+# TAB 5: WATCHLIST (fully dynamic, individual remove, no defaults)
 with tab5:
     st.subheader("⭐ Watchlist")
     st.caption("Add or remove individual items. Changes are saved permanently for all members.")
@@ -830,7 +830,7 @@ with tab5:
         st.success("Watchlist cleared")
         st.rerun()
 
-# TAB 6: Advanced Technical Analysis & Grok Moonshot Insights (V5 - Bifurcated)
+# TAB 6: Advanced Technical Analysis & Grok Moonshot Insights (V5 - Final)
 with tab6:
     st.subheader("📉 Advanced Technical Analysis & Grok Moonshot Insights")
     st.caption("Real-time fundamentals from yfinance • Persistent Grok qualitative analysis stored in Supabase")
@@ -846,55 +846,52 @@ with tab6:
     watchlist_tickers = st.session_state.get("watchlist", [])
     all_tickers = list(dict.fromkeys(portfolio_tickers + watchlist_tickers))
 
-    # ====================== YFINANCE FUNDAMENTALS (Robust) ======================
+    # ====================== YFINANCE FUNDAMENTALS ======================
     @st.cache_data(ttl=300)
     def get_fundamentals(ticker):
         try:
             stock = yf.Ticker(ticker)
             info = stock.info
             hist = stock.history(period="1y")
-
             price = info.get('currentPrice') or info.get('regularMarketPrice') or info.get('previousClose') or 0
             market_cap = info.get('marketCap') or 0
-
             return {
                 "Ticker": ticker,
                 "Company": info.get("longName", info.get("shortName", ticker)),
-                "Industry": info.get("industry", info.get("category", "N/A")),
+                "Industry": info.get("industry", "N/A"),
                 "Current Price": f"${price:.2f}",
+                "YoY %": f"{((hist['Close'].iloc[-1] / hist['Close'].iloc[0]) - 1)*100:.1f}%" if not hist.empty else "N/A",
                 "Market Cap": f"${market_cap/1e9:.2f}B" if market_cap else "N/A",
                 "50d SMA": f"${info.get('fiftyDayAverage', 0):.2f}",
                 "200d SMA": f"${info.get('twoHundredDayAverage', 0):.2f}",
-                "YoY %": f"{((hist['Close'].iloc[-1] / hist['Close'].iloc[0]) - 1)*100:.1f}%" if not hist.empty else "N/A",
                 "Forward P/E": f"{info.get('forwardPE', 'N/A'):.2f}",
                 "Analyst Target": f"${info.get('targetMeanPrice', 0):.2f}",
                 "Analysts": info.get("numberOfAnalystOpinions", "N/A"),
+                "3MMT EBIT": f"${info.get('ebitda', 0)/1e9:.2f}B" if info.get('ebitda') else "N/A",
+                "12MMT EPS": f"{info.get('trailingEps', 'N/A'):.2f}",
+                "Forward EPS": f"{info.get('forwardEps', 'N/A'):.2f}",
                 "Cash (B)": f"${info.get('totalCash', 0)/1e9:.2f}" if info.get('totalCash') else "N/A",
                 "FCF (B)": f"${info.get('freeCashflow', 0)/1e9:.2f}" if info.get('freeCashflow') else "N/A",
             }
         except:
-            return {"Ticker": ticker, "Company": "Error loading data", "Industry": "N/A"}
+            return {"Ticker": ticker, "Company": "N/A", "Industry": "N/A", "Current Price": "N/A", "YoY %": "N/A", "Market Cap": "N/A", "50d SMA": "N/A", "200d SMA": "N/A", "Forward P/E": "N/A", "Analyst Target": "N/A", "Analysts": "N/A", "3MMT EBIT": "N/A", "12MMT EPS": "N/A", "Forward EPS": "N/A", "Cash (B)": "N/A", "FCF (B)": "N/A"}
 
-    # Bifurcated Table Display
+    # Bifurcated Fundamentals Table
     if all_tickers:
         st.markdown("### 📊 Fundamentals & Technicals (from yfinance)")
-
-        # Portfolio Holdings (Top)
         if portfolio_tickers:
             st.markdown("#### Portfolio Holdings")
             rows = [get_fundamentals(t) for t in portfolio_tickers]
             st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
-
-        # Watchlist (Bottom)
         if watchlist_tickers:
             st.markdown("#### Watchlist")
             rows = [get_fundamentals(t) for t in watchlist_tickers]
             st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
-    # ====================== PERSISTENT GROK ANALYSIS ======================
-    st.markdown("### 🔍 Grok Moonshot Qualitative Analysis")
+    # ====================== GROK QUALITATIVE ANALYSIS ======================
+    st.markdown("### 🔍 Grok Qualitative Analysis")
 
-    # Load saved analyses
+    # Load persistent analyses
     if "grok_analyses" not in st.session_state:
         try:
             response = supabase.table("club_data").select("*").eq("id", 1).execute()
@@ -905,70 +902,84 @@ with tab6:
 
     selected_for_refresh = st.multiselect("Select tickers to refresh", all_tickers, default=all_tickers[:3])
 
-    col_a, col_b = st.columns(2)
-    with col_a:
-        if st.button("🔄 Refresh Selected Tickers", type="primary") and selected_for_refresh:
-            if client is None:
-                st.error("Grok client not initialized.")
-            else:
-                with st.spinner("Calling Grok API..."):
-                    for ticker in selected_for_refresh:
-                        prompt = f"""You are an expert investment analyst for a moonshot-focused club seeking 2X+ returns.
+    if st.button("🔄 Analyze/Update Selected Tickers", type="primary") and selected_for_refresh:
+        if client is None:
+            st.error("Grok client not initialized.")
+        else:
+            with st.spinner("Calling Grok API..."):
+                for ticker in selected_for_refresh:
+                    prompt = f"""You are an expert investment analyst for a moonshot-focused club seeking 2X+ returns.
 
-Analyze ticker **{ticker}** and focus on qualitative insights:
+Analyze ticker **{ticker}** and return a structured summary with these exact fields:
 
-**1. Company Overview**
-- Core business and what they do
-- Key differentiation and whether they are best-of-breed
+**Company**: [name]
+**Industry**: [industry]
+**Sub Industry**: [sub industry]
+**Best of Breed**: Yes/No + short reason
+**Industry and Sub Industry Growth**: [growth outlook]
+**Top Competitors**: [list]
+**List Products and % of Total Rev**: [key products + %]
+**Total Current Revenue**: [amount]
+**Gross Margin**: [percentage]
+**Net Op Margin**: [percentage]
+**Upcoming products/verticals**: [list]
+**Worst/Base/Best Case Revenue 12 Months**: [worst / base / best]
+**Worst/Base/Best Case Revenue 24 Months**: [worst / base / best]
+**Catalysts and News**: [new plants, contracts, etc]
+**Competitive Moat**: [what is it?]
+**Thesis**: [overall investment thesis including lack of energy, defense spending, self-driving cars, data centers in space, etc]
 
-**2. Competitive Landscape**
-- Main competitors
-- What makes this company stand out (or not)
+Be concise, honest, and data-driven."""
 
-**3. Moonshot Assessment**
-- Major catalysts for significant upside
-- Major risks and concerns
-- Recommended entry point or timing
-- Overall conviction level for our club
-
-Be concise and use bullet points."""
-
-                        try:
-                            response = client.chat.completions.create(
-                                model="grok-4-1-fast",
-                                messages=[{"role": "user", "content": prompt}],
-                                temperature=0.7,
-                                max_tokens=1100
-                            )
-                            new_entry = {
-                                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                                "ticker": ticker,
-                                "analysis": response.choices[0].message.content
-                            }
-                            st.session_state.grok_analyses = [a for a in st.session_state.grok_analyses if a["ticker"] != ticker]
-                            st.session_state.grok_analyses.append(new_entry)
-                        except Exception as e:
-                            st.error(f"Error analyzing {ticker}: {e}")
-
-                    # Save to Supabase
                     try:
-                        current = supabase.table("club_data").select("*").eq("id", 1).execute()
-                        data_dict = current.data[0]["data"] if current.data else {}
-                        data_dict["grok_analyses"] = st.session_state.grok_analyses
-                        supabase.table("club_data").upsert({"id": 1, "data": data_dict}).execute()
-                        st.success("✅ Saved to Supabase!")
-                    except:
-                        st.warning("Saved in session only.")
-                    st.rerun()
+                        response = client.chat.completions.create(
+                            model="grok-4-1-fast",
+                            messages=[{"role": "user", "content": prompt}],
+                            temperature=0.7,
+                            max_tokens=1200
+                        )
+                        new_entry = {
+                            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                            "ticker": ticker,
+                            "analysis": response.choices[0].message.content
+                        }
+                        st.session_state.grok_analyses = [a for a in st.session_state.grok_analyses if a["ticker"] != ticker]
+                        st.session_state.grok_analyses.append(new_entry)
+                    except Exception as e:
+                        st.error(f"Error analyzing {ticker}: {e}")
 
-    # Display Grok History
+                # Save to Supabase
+                try:
+                    current = supabase.table("club_data").select("*").eq("id", 1).execute()
+                    data_dict = current.data[0]["data"] if current.data else {}
+                    data_dict["grok_analyses"] = st.session_state.grok_analyses
+                    supabase.table("club_data").upsert({"id": 1, "data": data_dict}).execute()
+                    st.success("✅ Saved to Supabase!")
+                except:
+                    st.warning("Saved in session only.")
+                st.rerun()
+
+    # Grok Summary Table (Latest per Ticker)
     if st.session_state.grok_analyses:
-        st.markdown("#### 📜 Grok Analysis History")
+        st.markdown("### 📋 Grok Qualitative Analysis Summary (Latest)")
+        summary_rows = []
+        latest = {entry["ticker"]: entry for entry in st.session_state.grok_analyses}
+        for ticker in all_tickers:
+            if ticker in latest:
+                entry = latest[ticker]
+                summary_rows.append({"Ticker": ticker, "Last Updated": entry.get("timestamp", "N/A"), "Status": "✅ Analyzed"})
+            else:
+                summary_rows.append({"Ticker": ticker, "Last Updated": "Never", "Status": "⚠️ Needs Analysis"})
+        st.dataframe(pd.DataFrame(summary_rows), width="stretch", hide_index=True)
+
+    # Detailed Grok History (expandable)
+    if st.session_state.grok_analyses:
+        st.markdown("#### 📜 Detailed Grok Analysis History")
         for entry in sorted(st.session_state.grok_analyses, key=lambda x: x.get("timestamp", ""), reverse=True):
             with st.expander(f"🔍 {entry['ticker']} — {entry.get('timestamp', 'Unknown date')}"):
                 st.markdown(entry["analysis"])
     else:
-        st.info("No Grok analyses saved yet. Select tickers above and click 'Refresh Selected Tickers' to start the log.")
+        st.info("No Grok analyses saved yet. Use the button above to start.")
 
     st.caption("Fundamentals from yfinance (free) • Grok used only for qualitative insights • All analyses saved persistently in Supabase")
 
