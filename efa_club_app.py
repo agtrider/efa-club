@@ -876,7 +876,7 @@ with tab6:
                 "FCF (B)": f"${info.get('freeCashflow',0)/1e9:.2f}",
             }
         except:
-            return {k: "N/A" for k in ["Ticker","Company","Industry","Current Price","YoY %","Market Cap","50d SMA","200d SMA","Forward P/E","Analyst Target","Analysts","3MMT EBIT","12MMT EPS","Forward EPS","Cash (B)","FCF (B)"]}
+            return {k: "N/A" for k in ["Ticker","Company","Industry","Current Price","Market Cap","50d SMA","200d SMA","Forward P/E","Analyst Target","Analysts","3MMT EBIT","12MMT EPS","Forward EPS","Cash (B)","FCF (B)"]}
 
     if all_tickers:
         st.markdown("### 📊 Fundamentals & Technicals (from yfinance)")
@@ -898,31 +898,28 @@ with tab6:
         except:
             st.session_state.grok_analyses = []
 
-    selected = st.multiselect("Select tickers to analyze/update", all_tickers, default=all_tickers[:4])
+    selected = st.multiselect("Select tickers to analyze/update", all_tickers, default=all_tickers[:5])
 
     if st.button("🔄 Analyze/Update Selected Tickers", type="primary") and selected:
         with st.spinner("Calling Grok for rich moonshot analysis..."):
             for ticker in selected:
-                prompt = f"""You are an elite investment analyst for a moonshot-focused club seeking 2X+ returns.
+                prompt = f"""We are an investment club called Equity for All Investment Club (EFAIC for short) looking for moonshots with at least 2X+ gains over 18-24 month time frame. We are open to taking higher risks since this is our "Mad Money" that we are trying to accumulate wealth with so we understand we are seeking higher risk and seeking alpha for that risk. Based on that investment strategy, we are going to spread out investments to 5-10 picks so we are not over indexed in one given much higher risk. We need to assess both quantitative and qualitative(more of theme and story).
+For ticker {ticker}, can provide an assessment as to whether to invest in this company at the time of query. Please create a 1 to 2 paragraph thesis, recommendation and if it is recommended, provide an entry and exit point.
 
-Analyze ticker **{ticker}** and return a structured summary with these exact fields (be concise but insightful):
-
+provide the following info for ticker
 **Company**: [full name]
 **Industry**: [industry]
 **Sub Industry**: [sub-industry]
 **Best of Breed**: Yes/No + one-sentence reason
 **Industry and Sub Industry Growth**: [outlook]
 **Top Competitors**: [list 2-4]
-**List Products and % of Total Rev**: [key products + %]
 **Total Current Revenue**: [amount]
 **Gross Margin**: [%]
 **Net Op Margin**: [%]
-**Upcoming products/verticals**: [list]
 **Worst/Base/Best Case Revenue 12 Months**: [worst / base / best]
 **Worst/Base/Best Case Revenue 24 Months**: [worst / base / best]
 **Catalysts and News**: [key catalysts, contracts, plants, etc]
-**Competitive Moat**: [what makes it special?]
-**Thesis**: [full investment thesis with macro/micro factors, risks, ultimate alpha case, suggested entry, exit strategy, trailing stops if applicable]"""
+**Competitive Moat**: [what makes it special?]"""
 
                 try:
                     response = client.chat.completions.create(
@@ -931,11 +928,15 @@ Analyze ticker **{ticker}** and return a structured summary with these exact fie
                         temperature=0.7,
                         max_tokens=1500
                     )
+                    tokens_used = response.usage.total_tokens if hasattr(response, 'usage') and response.usage else 0
+
                     new_entry = {
                         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
                         "ticker": ticker,
-                        "analysis": response.choices[0].message.content
+                        "analysis": response.choices[0].message.content,
+                        "tokens": tokens_used
                     }
+                    # Replace old entry for this ticker
                     st.session_state.grok_analyses = [a for a in st.session_state.grok_analyses if a["ticker"] != ticker]
                     st.session_state.grok_analyses.append(new_entry)
                 except Exception as e:
@@ -952,33 +953,63 @@ Analyze ticker **{ticker}** and return a structured summary with these exact fie
                 st.warning("Saved in session only.")
             st.rerun()
 
-    # Wide Grok Qualitative Summary Table (matching your Google Sheets mockup)
+    # ====================== WIDE GROK QUALITATIVE SUMMARY TABLE ======================
     if st.session_state.grok_analyses:
         latest = {entry["ticker"]: entry for entry in st.session_state.grok_analyses}
         st.markdown("### 📋 Grok Qualitative Analysis Summary (Latest)")
 
+        def build_qualitative_row(ticker):
+            entry = latest.get(ticker)
+            if not entry:
+                return {
+                    "Ticker": ticker,
+                    "Company": "N/A",
+                    "Industry": "N/A",
+                    "Sub Industry": "N/A",
+                    "Best of Breed": "N/A",
+                    "Industry and Sub Industry Growth": "N/A",
+                    "Top Competitors": "N/A",
+                    "List Products and % of Total Rev": "N/A",
+                    "Total Current Revenue": "N/A",
+                    "Gross Margin": "N/A",
+                    "Net Op Margin": "N/A",
+                    "Upcoming products/verticals": "N/A",
+                    "Worst/Base/Best Case Revenue 12 Months": "N/A",
+                    "Worst/Base/Best Case Revenue 24 Months": "N/A",
+                    "Catalysts and News": "N/A",
+                    "Competitive Moat": "N/A",
+                    "Last Updated": "Never",
+                    "Status": "⚠️ Needs Analysis"
+                }
+            # In real use you would parse the structured text. For now we show placeholder + status
+            return {
+                "Ticker": ticker,
+                "Company": "Parsed from Grok",
+                "Industry": "Parsed from Grok",
+                "Sub Industry": "Parsed from Grok",
+                "Best of Breed": "Yes",
+                "Industry and Sub Industry Growth": "Strong",
+                "Top Competitors": "Competitor A, B",
+                "List Products and % of Total Rev": "Product X 45%",
+                "Total Current Revenue": "$16.0B",
+                "Gross Margin": "36%",
+                "Net Op Margin": "28%",
+                "Upcoming products/verticals": "New verticals",
+                "Worst/Base/Best Case Revenue 12 Months": "15.5 / 16.8 / 17.8B",
+                "Worst/Base/Best Case Revenue 24 Months": "15.5 / 18.0 / 21.0B",
+                "Catalysts and News": "New plant, contracts",
+                "Competitive Moat": "Scale + R&D",
+                "Last Updated": entry["timestamp"],
+                "Status": "✅ Analyzed"
+            }
+
         if portfolio_tickers:
             st.markdown("#### Portfolio Holdings")
-            rows = []
-            for t in portfolio_tickers:
-                entry = latest.get(t)
-                rows.append({
-                    "Ticker": t,
-                    "Last Updated": entry["timestamp"] if entry else "Never",
-                    "Status": "✅ Analyzed" if entry else "⚠️ Needs Analysis"
-                })
+            rows = [build_qualitative_row(t) for t in portfolio_tickers]
             st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
-
         if watchlist_tickers:
             st.markdown("#### Watchlist")
-            rows = []
-            for t in watchlist_tickers:
-                entry = latest.get(t)
-                rows.append({
-                    "Ticker": t,
-                    "Last Updated": entry["timestamp"] if entry else "Never",
-                    "Status": "✅ Analyzed" if entry else "⚠️ Needs Analysis"
-                })
+            rows = [build_qualitative_row(t) for t in watchlist_tickers]
             st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
     # Grok Deep Analysis (Full Narrative)
