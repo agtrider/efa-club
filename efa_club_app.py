@@ -841,7 +841,7 @@ with tab5:
                 st.error(f"Error: {e}")
             st.rerun()
 
-# TAB 6: Advanced Technical Analysis & Grok Moonshot Insights (V5 - Bifurcated)
+# TAB 6: Advanced Technical Analysis & Grok Moonshot Insights (V5 - Final)
 with tab6:
     st.subheader("📉 Advanced Technical Analysis & Grok Moonshot Insights")
     st.caption("Real-time fundamentals from yfinance • Persistent Grok qualitative analysis")
@@ -854,8 +854,8 @@ with tab6:
 
     all_tickers = list(dict.fromkeys(portfolio_tickers + watchlist_tickers))
 
-    # Debug line - remove after it works in production
-    st.caption(f"✅ Portfolio from Tab 2: {portfolio_tickers} | Watchlist: {watchlist_tickers}")
+    # Debug (remove after everything is stable)
+    # st.caption(f"✅ Portfolio from Tab 2: {portfolio_tickers} | Watchlist: {watchlist_tickers}")
 
     # ====================== YFINANCE FUNDAMENTALS ======================
     @st.cache_data(ttl=300)
@@ -963,6 +963,7 @@ Analyze ticker **{ticker}** and return a structured summary with these exact fie
     if st.session_state.grok_analyses:
         latest = {entry["ticker"]: entry for entry in st.session_state.grok_analyses}
         st.markdown("### 📋 Grok Qualitative Analysis Summary (Latest)")
+
         if portfolio_tickers:
             st.markdown("#### Portfolio Holdings")
             rows = []
@@ -974,6 +975,7 @@ Analyze ticker **{ticker}** and return a structured summary with these exact fie
                     "Status": "✅ Analyzed" if entry else "⚠️ Needs Analysis"
                 })
             st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+
         if watchlist_tickers:
             st.markdown("#### Watchlist")
             rows = []
