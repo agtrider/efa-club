@@ -240,6 +240,27 @@ def save_finalized_meetings(meetings):
     except:
         pass
 
+# ====================== PRICE CACHE HELPERS ======================
+def load_last_prices():
+    """Load last known prices from club_data"""
+    try:
+        res = supabase.table("club_data").select("*").eq("id", 1).execute()
+        if res.data:
+            return res.data[0]["data"].get("last_prices", {})
+    except:
+        pass
+    return {}
+
+def save_last_prices(prices_dict):
+    """Save last known prices to club_data"""
+    try:
+        res = supabase.table("club_data").select("*").eq("id", 1).execute()
+        data_dict = res.data[0]["data"] if res.data else {}
+        data_dict["last_prices"] = prices_dict
+        supabase.table("club_data").upsert({"id": 1, "data": data_dict}).execute()
+    except:
+        pass
+
 # ====================== ULTRA-ROBUST PRICE FETCHER ======================
 @st.cache_data(ttl=180)
 def get_price(ticker):
@@ -248,28 +269,48 @@ def get_price(ticker):
         info = stock.info
         price = info.get("currentPrice")
         if price and price > 0:
-            return float(price)
-        price = info.get("regularMarketPreviousClose")
-        if price and price > 0:
-            return float(price)
-        price = info.get("previousClose")
-        if price and price > 0:
-            return float(price)
-        for period in ["5d", "1mo", "3mo"]:
-            hist = stock.history(period=period, progress=False)
-            if not hist.empty:
-                price = hist["Close"].iloc[-1]
+            final_price = float(price)
+        else:
+            price = info.get("regularMarketPreviousClose")
+            if price and price > 0:
+                final_price = float(price)
+            else:
+                price = info.get("previousClose")
                 if price and price > 0:
-                    return float(price)
-        for period in ["1d", "5d", "1mo"]:
-            df = yf.download(ticker, period=period, progress=False, auto_adjust=True)
-            if not df.empty:
-                price = df["Close"].iloc[-1]
-                if price and price > 0:
-                    return float(price)
-        return 0.0
+                    final_price = float(price)
+                else:
+                    for period in ["5d", "1mo", "3mo"]:
+                        hist = stock.history(period=period, progress=False)
+                        if not hist.empty:
+                            price = hist["Close"].iloc[-1]
+                            if price and price > 0:
+                                final_price = float(price)
+                                break
+                    else:
+                        for period in ["1d", "5d", "1mo"]:
+                            df = yf.download(ticker, period=period, progress=False, auto_adjust=True)
+                            if not df.empty:
+                                price = df["Close"].iloc[-1]
+                                if price and price > 0:
+                                    final_price = float(price)
+                                    break
+                        else:
+                            final_price = 0.0
+        # ====================== SAVE SUCCESSFUL PRICE TO SUPABASE ======================
+        if final_price > 0:
+            last_prices = load_last_prices()
+            last_prices[ticker] = {
+                "price": final_price,
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M")
+            }
+            save_last_prices(last_prices)
+        
+        return final_price
+
     except Exception:
-        return 0.0
+        # Fallback to last saved price if yfinance fails
+        last_prices = load_last_prices()
+        return last_prices.get(ticker, {}).get("price", 0.0)
 
 # ====================== TECHNICAL INDICATORS FOR TAB 6 ======================
 @st.cache_data(ttl=300)
