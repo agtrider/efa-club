@@ -171,10 +171,10 @@ def load_watchlist():
     try:
         response = supabase.table("club_data").select("*").eq("id", 1).execute()
         if response.data and len(response.data) > 0:
-            return response.data[0]["data"].get("watchlist", ["XRP", "HOOD"])
+            return response.data[0]["data"].get("watchlist", [])  # Empty list by default - NO XRP/HOOD
     except:
         pass
-    return ["XRP", "HOOD"]
+    return []  # Start completely empty
 
 def save_watchlist(watchlist):
     try:
@@ -793,7 +793,7 @@ with tab4:
     else:
         st.info("No transactions yet.")
 
-# TAB 5: WATCHLIST (fully dynamic, individual remove, no defaults)
+# TAB 5: WATCHLIST (Ultra Safe - Only touches watchlist)
 with tab5:
     st.subheader("⭐ Watchlist")
     st.caption("Add or remove individual items. Changes are saved permanently for all members.")
@@ -802,14 +802,16 @@ with tab5:
     new_ticker = st.text_input("Add ticker to watchlist (e.g. AAPL)", key="add_watch")
     if st.button("Add to Watchlist", key="add_watch_btn"):
         ticker_upper = new_ticker.strip().upper()
-        if ticker_upper and ticker_upper not in st.session_state.watchlist:
+        if ticker_upper and ticker_upper not in st.session_state.get("watchlist", []):
+            if "watchlist" not in st.session_state:
+                st.session_state.watchlist = []
             st.session_state.watchlist.append(ticker_upper)
             save_watchlist(st.session_state.watchlist)
             st.success(f"✅ Added {ticker_upper}")
             st.rerun()
 
-    # Display watchlist with individual remove buttons
-    if st.session_state.watchlist:
+    # Display watchlist
+    if st.session_state.get("watchlist"):
         st.write("**Current Watchlist**")
         for i, ticker in enumerate(st.session_state.watchlist[:]):
             col1, col2 = st.columns([4, 1])
@@ -822,21 +824,22 @@ with tab5:
                     st.success(f"✅ Removed {ticker}")
                     st.rerun()
     else:
-        st.info("Watchlist is empty. Add tickers above.")
+        st.info("Watchlist is empty.")
 
-    # Admin-only full clear from Supabase
-    if st.session_state.is_admin:
-        if st.button("🗑️ ADMIN: Clear Entire Watchlist from Supabase", type="secondary"):
+    # ADMIN ONLY - SAFE CLEAR (only watchlist)
+    if st.session_state.get("is_admin", False):
+        if st.button("🗑️ ADMIN: Clear Watchlist ONLY from Supabase", type="secondary"):
             st.session_state.watchlist = []
-            save_watchlist([])
-            st.success("✅ Watchlist completely cleared from Supabase")
+            try:
+                current = supabase.table("club_data").select("*").eq("id", 1).execute()
+                if current.data:
+                    data_dict = current.data[0]["data"] if current.data else {}
+                    data_dict["watchlist"] = []   # Only this key is changed
+                    supabase.table("club_data").upsert({"id": 1, "data": data_dict}).execute()
+                st.success("✅ Watchlist cleared. **All other data is untouched.**")
+            except Exception as e:
+                st.error(f"Error: {e}")
             st.rerun()
-
-    if st.button("Clear Entire Watchlist", key="clear_watch"):
-        st.session_state.watchlist = []
-        save_watchlist([])
-        st.success("Watchlist cleared")
-        st.rerun()
 
 # TAB 6: Advanced Technical Analysis & Grok Moonshot Insights (V5 - Bifurcated)
 with tab6:
