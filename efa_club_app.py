@@ -846,15 +846,16 @@ with tab6:
     st.subheader("📉 Advanced Technical Analysis & Grok Moonshot Insights")
     st.caption("Real-time fundamentals from yfinance • Persistent Grok qualitative analysis")
 
-    # Get tickers
-    df_txn = pd.DataFrame(data["transactions"])
-    portfolio_tickers = []
-    if not df_txn.empty and "type" in df_txn.columns and "ticker" in df_txn.columns:
-        buy_mask = df_txn["type"].astype(str).str.contains("Buy", na=False)
-        portfolio_tickers = [t.upper() for t in df_txn[buy_mask]["ticker"].dropna().unique().tolist() if t and t.upper() != "CASH"]
+    # ====================== GET TICKERS (reliable version) ======================
+    # Reuse the same holdings dict that Tab 2 already builds correctly
+    portfolio_tickers = [ticker for ticker in holdings.keys() if ticker != "CASH"]
 
     watchlist_tickers = st.session_state.get("watchlist", [])
+
     all_tickers = list(dict.fromkeys(portfolio_tickers + watchlist_tickers))
+
+    # Optional debug (remove after it works)
+    # st.caption(f"Debug → Portfolio: {portfolio_tickers} | Watchlist: {watchlist_tickers}")
 
     # ====================== YFINANCE FUNDAMENTALS ======================
     @st.cache_data(ttl=300)
