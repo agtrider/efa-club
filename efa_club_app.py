@@ -976,15 +976,14 @@ provide the following info for ticker
                         max_tokens=1500
                     )
                     tokens_used = response.usage.total_tokens if hasattr(response, 'usage') and response.usage else 0
-
+                    
                     new_entry = {
                         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
                         "ticker": ticker,
                         "analysis": response.choices[0].message.content,
                         "tokens": tokens_used
                     }
-                    # Replace old entry for this ticker
-                    st.session_state.grok_analyses = [a for a in st.session_state.grok_analyses if a["ticker"] != ticker]
+                    # Append new analysis — keep ALL historical versions
                     st.session_state.grok_analyses.append(new_entry)
                 except Exception as e:
                     st.error(f"Error analyzing {ticker}: {e}")
