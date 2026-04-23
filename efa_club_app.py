@@ -841,21 +841,15 @@ with tab5:
                 st.error(f"Error: {e}")
             st.rerun()
 
-# TAB 6: Advanced Technical Analysis & Grok Moonshot Insights (V5 - Final)
+# TAB 6: Advanced Technical Analysis & Grok Moonshot Insights (V5 - Final Wide Table)
 with tab6:
     st.subheader("📉 Advanced Technical Analysis & Grok Moonshot Insights")
     st.caption("Real-time fundamentals from yfinance • Persistent Grok qualitative analysis")
 
     # ====================== GET TICKERS - DIRECT LINK TO TAB 2 ======================
-    # Use the exact same holdings dict that Tab 2 builds successfully
     portfolio_tickers = [ticker for ticker in holdings.keys() if ticker != "CASH"]
-
     watchlist_tickers = st.session_state.get("watchlist", [])
-
     all_tickers = list(dict.fromkeys(portfolio_tickers + watchlist_tickers))
-
-    # Debug (remove after everything is stable)
-    # st.caption(f"✅ Portfolio from Tab 2: {portfolio_tickers} | Watchlist: {watchlist_tickers}")
 
     # ====================== YFINANCE FUNDAMENTALS ======================
     @st.cache_data(ttl=300)
@@ -869,7 +863,6 @@ with tab6:
                 "Company": info.get("longName", ticker),
                 "Industry": info.get("industry", "N/A"),
                 "Current Price": f"${price:.2f}",
-                "YoY %": "N/A",
                 "Market Cap": f"${info.get('marketCap',0)/1e9:.2f}B",
                 "50d SMA": f"${info.get('fiftyDayAverage',0):.2f}",
                 "200d SMA": f"${info.get('twoHundredDayAverage',0):.2f}",
@@ -919,7 +912,7 @@ Analyze ticker **{ticker}** and return a structured summary with these exact fie
 **Sub Industry**: [sub-industry]
 **Best of Breed**: Yes/No + one-sentence reason
 **Industry and Sub Industry Growth**: [outlook]
-**Top Competitors**: [list]
+**Top Competitors**: [list 2-4]
 **List Products and % of Total Rev**: [key products + %]
 **Total Current Revenue**: [amount]
 **Gross Margin**: [%]
@@ -927,9 +920,9 @@ Analyze ticker **{ticker}** and return a structured summary with these exact fie
 **Upcoming products/verticals**: [list]
 **Worst/Base/Best Case Revenue 12 Months**: [worst / base / best]
 **Worst/Base/Best Case Revenue 24 Months**: [worst / base / best]
-**Catalysts and News**: [new plants, contracts, etc]
+**Catalysts and News**: [key catalysts, contracts, plants, etc]
 **Competitive Moat**: [what makes it special?]
-**Thesis**: [full investment thesis including macro/micro factors, why it could be a moonshot, risks, ultimate alpha case]"""
+**Thesis**: [full investment thesis with macro/micro factors, risks, ultimate alpha case, suggested entry, exit strategy, trailing stops if applicable]"""
 
                 try:
                     response = client.chat.completions.create(
@@ -959,7 +952,7 @@ Analyze ticker **{ticker}** and return a structured summary with these exact fie
                 st.warning("Saved in session only.")
             st.rerun()
 
-    # Bifurcated Grok Qualitative Summary Table
+    # Wide Grok Qualitative Summary Table (matching your Google Sheets mockup)
     if st.session_state.grok_analyses:
         latest = {entry["ticker"]: entry for entry in st.session_state.grok_analyses}
         st.markdown("### 📋 Grok Qualitative Analysis Summary (Latest)")
