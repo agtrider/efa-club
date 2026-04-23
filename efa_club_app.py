@@ -944,8 +944,12 @@ with tab6:
     if st.button("🔄 Analyze/Update Selected Tickers", type="primary") and selected:
         with st.spinner("Calling Grok for rich moonshot analysis..."):
             for ticker in selected:
+                # Get company name from fundamentals for clarity
+                fund_data = get_fundamentals(ticker)
+                company_name = fund_data.get("Company", ticker)
+
                 prompt = f"""We are an investment club called Equity for All Investment Club (EFAIC for short) looking for moonshots with at least 2X+ gains over 18-24 month time frame. We are open to taking higher risks since this is our "Mad Money" that we are trying to accumulate wealth with so we understand we are seeking higher risk and seeking alpha for that risk. Based on that investment strategy, we are going to spread out investments to 5-10 picks so we are not over indexed in one given much higher risk. We need to assess both quantitative and qualitative(more of theme and story).
-For ticker {ticker}, can provide an assessment as to whether to invest in this company at the time of query. Please create a 1 to 2 paragraph thesis, recommendation and if it is recommended, provide an entry and exit point.
+For ticker {ticker} ({company_name}), can provide an assessment as to whether to invest in this company at the time of query. Please create a 1 to 2 paragraph thesis, recommendation and if it is recommended, provide an entry and exit point.
 
 provide the following info for ticker
 **Company**: [full name]
