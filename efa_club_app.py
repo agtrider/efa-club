@@ -839,20 +839,22 @@ with tab5:
     st.subheader("⭐ Watchlist")
     st.caption("Add or remove individual items. Changes are saved permanently for all members.")
 
+    # FORCE RELOAD FROM SUPABASE ON EVERY VISIT (fixes logout/login loss)
+    if "watchlist" not in st.session_state or st.session_state.watchlist is None:
+        st.session_state.watchlist = load_watchlist()
+
     # Add new ticker
     new_ticker = st.text_input("Add ticker to watchlist (e.g. AAPL)", key="add_watch")
     if st.button("Add to Watchlist", key="add_watch_btn"):
         ticker_upper = new_ticker.strip().upper()
-        if ticker_upper and ticker_upper not in st.session_state.get("watchlist", []):
-            if "watchlist" not in st.session_state:
-                st.session_state.watchlist = []
+        if ticker_upper and ticker_upper not in st.session_state.watchlist:
             st.session_state.watchlist.append(ticker_upper)
             save_watchlist(st.session_state.watchlist)
             st.success(f"✅ Added {ticker_upper}")
             st.rerun()
 
     # Display watchlist
-    if st.session_state.get("watchlist"):
+    if st.session_state.watchlist:
         st.write("**Current Watchlist**")
         for i, ticker in enumerate(st.session_state.watchlist[:]):
             col1, col2 = st.columns([4, 1])
@@ -867,7 +869,7 @@ with tab5:
     else:
         st.info("Watchlist is empty.")
 
-    # ADMIN ONLY - SAFE CLEAR (only watchlist)
+    # ADMIN ONLY - SAFE CLEAR
     if st.session_state.get("is_admin", False):
         if st.button("🗑️ ADMIN: Clear Watchlist ONLY from Supabase", type="secondary"):
             st.session_state.watchlist = []
@@ -1061,7 +1063,8 @@ provide the following info for ticker
     if st.session_state.grok_analyses:
         st.markdown("#### 📜 Grok Deep Analysis (Full Narrative)")
         for entry in sorted(st.session_state.grok_analyses, key=lambda x: x.get("timestamp", ""), reverse=True):
-            with st.expander(f"🔍 {entry['ticker']} — {entry.get('timestamp', 'Unknown')}"):
+            token_info = f" ({entry.get('tokens', 'N/A')} tokens)" if entry.get('tokens') else ""
+            with st.expander(f"🔍 {entry['ticker']} — {entry.get('timestamp', 'Unknown')}{token_info}"):
                 st.markdown(entry["analysis"])
 
     st.caption("All Grok analyses are saved permanently in Supabase • yfinance used for fundamentals to keep costs low")
