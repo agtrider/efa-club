@@ -830,10 +830,10 @@ with tab5:
         st.success("Watchlist cleared")
         st.rerun()
 
-# TAB 6: Advanced Technical Analysis + Grok Moonshot Insights (Persistent History)
+# TAB 6: Advanced Technical Analysis & Grok Moonshot Insights (V5 - Persistent)
 with tab6:
     st.subheader("📉 Advanced Technical Analysis & Grok Moonshot Insights")
-    st.caption("Real-time fundamentals & technicals from yfinance • Persistent Grok qualitative analysis stored in Supabase")
+    st.caption("Real-time fundamentals from yfinance • Persistent Grok qualitative analysis stored in Supabase")
 
     # Get tickers
     df_txn = pd.DataFrame(data["transactions"])
@@ -846,7 +846,7 @@ with tab6:
     watchlist_tickers = st.session_state.get("watchlist", [])
     all_tickers = list(dict.fromkeys(portfolio_tickers + watchlist_tickers))
 
-    # ====================== YFINANCE FUNDAMENTALS TABLE ======================
+    # ====================== YFINANCE FUNDAMENTALS TABLE (Omnipresent) ======================
     @st.cache_data(ttl=300)
     def get_fundamentals(ticker):
         try:
@@ -879,12 +879,15 @@ with tab6:
     # ====================== PERSISTENT GROK ANALYSIS ======================
     st.markdown("### 🔍 Grok Moonshot Qualitative Analysis")
 
-    # Load saved analyses from Supabase
+    # Robust load from Supabase
     if "grok_analyses" not in st.session_state:
         try:
             response = supabase.table("club_data").select("*").eq("id", 1).execute()
-            current_data = response.data[0]["data"] if response.data else {}
-            st.session_state.grok_analyses = current_data.get("grok_analyses", [])
+            if response.data and len(response.data) > 0:
+                current_data = response.data[0]["data"]
+                st.session_state.grok_analyses = current_data.get("grok_analyses", [])
+            else:
+                st.session_state.grok_analyses = []
         except:
             st.session_state.grok_analyses = []
 
@@ -894,7 +897,7 @@ with tab6:
     with col_a:
         if st.button("🔄 Refresh Selected Tickers", type="primary") and selected_for_refresh:
             if client is None:
-                st.error("Grok client not initialized. Check secrets.toml.")
+                st.error("Grok client not initialized.")
             else:
                 with st.spinner("Calling Grok API..."):
                     for ticker in selected_for_refresh:
@@ -947,7 +950,7 @@ Be concise and use bullet points."""
                         st.warning("Saved in session only.")
                     st.rerun()
 
-    # Display History (like Meeting Scheduler)
+    # Display History - Meeting Scheduler Style
     if st.session_state.grok_analyses:
         st.markdown("#### 📜 Grok Analysis History")
         for entry in sorted(st.session_state.grok_analyses, key=lambda x: x.get("timestamp", ""), reverse=True):
