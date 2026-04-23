@@ -846,16 +846,17 @@ with tab6:
     st.subheader("📉 Advanced Technical Analysis & Grok Moonshot Insights")
     st.caption("Real-time fundamentals from yfinance • Persistent Grok qualitative analysis")
 
-    # ====================== GET TICKERS (reliable version) ======================
-    # Reuse the same holdings dict that Tab 2 already builds correctly
+        # ====================== GET TICKERS (Reliable - uses same logic as Tab 2) ======================
+    # Portfolio tickers from the global holdings dict (already calculated correctly)
     portfolio_tickers = [ticker for ticker in holdings.keys() if ticker != "CASH"]
 
+    # Watchlist from session_state (already fixed)
     watchlist_tickers = st.session_state.get("watchlist", [])
 
     all_tickers = list(dict.fromkeys(portfolio_tickers + watchlist_tickers))
 
-    # Optional debug (remove after it works)
-    # st.caption(f"Debug → Portfolio: {portfolio_tickers} | Watchlist: {watchlist_tickers}")
+    # Debug (you can remove this line later)
+    st.caption(f"Portfolio: {portfolio_tickers} | Watchlist: {watchlist_tickers}")
 
     # ====================== YFINANCE FUNDAMENTALS ======================
     @st.cache_data(ttl=300)
