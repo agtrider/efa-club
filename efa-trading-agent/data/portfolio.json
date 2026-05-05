@@ -1,0 +1,11 @@
+{
+  "cash": 900.0,
+  "positions": {
+    "TSLA": {
+      "quantity": 0.2,
+      "avg_price": 250.0
+    }
+  },
+  "total_trades": 1,
+  "winning_trades": 0
+}

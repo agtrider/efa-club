@@ -1,0 +1,6 @@
+{
+    "python.terminal.useEnvFile": true,
+    "terminal.integrated.env.windows": {
+        "PYTHONPATH": "."
+    }
+}

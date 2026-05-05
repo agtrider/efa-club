@@ -1,0 +1,13 @@
+streamlit
+pandas
+numpy
+yfinance
+python-dotenv
+openai
+requests
+ccxt
+schedule
+python-binance
+pytz
+supabase==2.28.3
+finnhub-python
