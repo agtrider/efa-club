@@ -362,10 +362,16 @@ def auto_allocate_transactions():
         • 4/1 to 4/14/2026 → special $27,500 split from spreadsheet
         • After 4/15/2026 → 1/11 equal
     - Buys, Sells, Withdrawals, or anything else → ALWAYS 1/11 equal split
+
+    Manual allocations are protected and will never be overwritten.
     """
     members_list = [m["name"] for m in data["members"]]
 
     for txn in data["transactions"]:
+        # === NEW: Skip manually edited transactions ===
+        if txn.get("manual_allocation") == True:
+            continue
+
         if txn.get("allocations"):  # Already allocated
             continue
 
@@ -376,7 +382,7 @@ def auto_allocate_transactions():
         txn_type = str(txn.get("type", "")).lower()
         date_str = str(txn.get("date", "")).strip()
 
-        # Flexible date parsing (handles 12/31/2025 and 2026-04-14 formats)
+        # Flexible date parsing
         try:
             if "/" in date_str:
                 txn_date = datetime.strptime(date_str, "%m/%d/%Y")
@@ -412,7 +418,7 @@ def auto_allocate_transactions():
                 txn["allocations"] = {name: default for name in members_list}
             continue
 
-        # ==================== 2. EVERYTHING ELSE (Buys, Sells, Withdrawals) ====================
+        # ==================== 2. EVERYTHING ELSE ====================
         default = amount / 11
         txn["allocations"] = {name: default for name in members_list}
 
@@ -739,39 +745,82 @@ with tab2:
     if total_market == 0:
         st.warning("⚠️ Live prices are currently showing $0.00. This can happen during non-trading hours or temporary yfinance delays.")
 
-    # ====================== IMPROVED: PORTFOLIO PERFORMANCE HISTORY ======================
+    # ====================== PORTFOLIO PERFORMANCE HISTORY (REAL DATA) ======================
     st.subheader("📈 Portfolio Performance History")
-    st.caption("NAV over time + Return on every $1 invested (shows growth on capital deployed)")
+    st.caption("Daily snapshots • Portfolio NAV (securities + cash) + Return on every $1 invested")
 
-    if "historical_nav" not in st.session_state:
-        dates = pd.date_range(start="2026-03-01", periods=60, freq="D")
-        base_nav = max(total_market_value, 1000.0)
+    # Load existing history from Supabase
+    portfolio_history = load_from_supabase("portfolio_history", [])
+
+    # Calculate current values
+    current_securities_value = total_market_value
+    current_cash_balance = total_current_cash
+    current_portfolio_nav = current_securities_value + current_cash_balance
+
+    # Cumulative capital invested in securities (from dynamic totals)
+    cumulative_invested = sum(dynamic_totals.get(m["name"], {}).get("invested", 0.0) for m in data.get("members", []))
+    current_return_on_invested = (current_securities_value / cumulative_invested) if cumulative_invested > 0 else 1.0
+
+    # --- Manual Snapshot Button ---
+    col_btn1, col_btn2 = st.columns([2, 3])
+    with col_btn1:
+        if st.button("📅 Record Today's Portfolio Snapshot", type="primary", use_container_width=True):
+            today_str = datetime.now().strftime("%Y-%m-%d")
+
+            # Check if today's snapshot already exists
+            existing_dates = [entry.get("date") for entry in portfolio_history]
+            if today_str in existing_dates:
+                st.warning(f"Snapshot for {today_str} already exists. No duplicate recorded.")
+            else:
+                new_snapshot = {
+                    "date": today_str,
+                    "portfolio_nav": round(current_portfolio_nav, 2),
+                    "securities_value": round(current_securities_value, 2),
+                    "cash_balance": round(current_cash_balance, 2),
+                    "cumulative_invested": round(cumulative_invested, 2),
+                    "return_on_invested": round(current_return_on_invested, 4)
+                }
+                portfolio_history.append(new_snapshot)
+                # Sort by date just in case
+                portfolio_history = sorted(portfolio_history, key=lambda x: x["date"])
+                save_to_supabase("portfolio_history", portfolio_history)
+                st.success(f"✅ Snapshot for {today_str} recorded successfully!")
+                st.rerun()
+
+    with col_btn2:
+        if portfolio_history:
+            last_date = portfolio_history[-1]["date"]
+            st.info(f"Last recorded snapshot: **{last_date}**")
+        else:
+            st.warning("No historical snapshots recorded yet. Press the button above to start tracking.")
+
+    # --- Build DataFrame for Charts ---
+    if portfolio_history:
+        df_hist = pd.DataFrame(portfolio_history)
+        df_hist["Date"] = pd.to_datetime(df_hist["date"])
+        df_hist = df_hist.sort_values("Date")
+
+        # Two charts side by side
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("**Portfolio NAV Over Time**")
+            st.caption("Total value = Securities + Cash Balance")
+            st.line_chart(df_hist.set_index("Date")["portfolio_nav"], width="stretch", height=380)
         
-        # Simulate realistic growth with periodic investments
-        growth = np.cumsum(np.random.normal(0.0008, 0.012, 60))  # slight upward bias
-        nav_series = base_nav * (1 + growth)
-        
-        st.session_state.historical_nav = pd.DataFrame({
-            "Date": dates,
-            "Portfolio NAV": nav_series,
-            "Return on $1 Invested": nav_series / base_nav
-        })
+        with col2:
+            st.markdown("**Return on Every $1 Invested**")
+            st.caption("Growth on capital actually deployed into securities")
+            st.line_chart(df_hist.set_index("Date")["return_on_invested"], width="stretch", height=380)
 
-    df_hist = st.session_state.historical_nav
-
-    # Two charts side by side
-    col1, col2 = st.columns(2)
-    with col1:
-        st.markdown("**Portfolio NAV Over Time**")
-        st.line_chart(df_hist.set_index("Date")["Portfolio NAV"], width="stretch", height=380)
-    
-    with col2:
-        st.markdown("**Return on Every $1 Invested**")
-        st.line_chart(df_hist.set_index("Date")["Return on $1 Invested"], width="stretch", height=380)
-
-    # Summary metrics
-    st.metric("Current Portfolio NAV", f"${total_market_value:,.0f}", 
-              delta=f"{overall_return:+.2f}% since inception")
+        # Summary metrics
+        latest = portfolio_history[-1]
+        st.metric(
+            "Current Portfolio NAV", 
+            f"${latest['portfolio_nav']:,.0f}",
+            delta=f"${latest['portfolio_nav'] - portfolio_history[0]['portfolio_nav']:,.0f} since first snapshot"
+        )
+    else:
+        st.info("No performance history yet. Click the button above to record your first snapshot.")
 
     # ====================== INVESTMENT GOALS & TARGETS (NOW WITH SUPABASE) ======================
     st.subheader("🎯 Investment Goals & Targets")
@@ -863,35 +912,82 @@ with tab3:
 # TAB 4: Transaction History
 with tab4:
     st.subheader("Transaction History (Master Table)")
+
     txn_df = pd.DataFrame(data["transactions"])
+
     if not txn_df.empty:
         txn_df = txn_df.sort_values("date", ascending=False).reset_index(drop=True)
         txn_df_display = txn_df.copy()
+
+        # Format amount for display
         txn_df_display["amount"] = txn_df_display.apply(
             lambda row: abs(row["amount"]) if str(row.get("type", "")).lower().startswith("buy") else row["amount"],
             axis=1
         )
+
         members_list = [m["name"] for m in data["members"]]
+
+        # Show per-member allocations
         for member in members_list:
-            txn_df_display[member] = txn_df["allocations"].apply(lambda x: x.get(member, 0) if isinstance(x, dict) else 0)
+            txn_df_display[member] = txn_df["allocations"].apply(
+                lambda x: x.get(member, 0) if isinstance(x, dict) else 0
+            )
+
+        # Clean up columns for display
         if "allocations" in txn_df_display.columns:
             txn_df_display = txn_df_display.drop(columns=["allocations", "id"], errors="ignore")
-        numeric_cols = txn_df_display.select_dtypes(include=['number']).columns
-        total_row = txn_df_display[numeric_cols].sum().to_dict()
-        total_row["date"] = "**TOTAL**"
-        total_row["type"] = ""
-        total_row["ticker"] = ""
-        txn_df_display = pd.concat([txn_df_display, pd.DataFrame([total_row])], ignore_index=True)
-        stock_buys = txn_df[txn_df.get("type", "").str.contains("Buy", na=False)]
-        stock_sells = txn_df[txn_df.get("type", "").str.contains("Sell", na=False)]
-        deposits = txn_df[txn_df.get("type", "").str.contains("Deposit|Opening Deposit|Early Deposit", na=False)]
-        withdrawals = txn_df[txn_df.get("type", "").str.contains("Withdrawal", na=False)]
-        total_invested = stock_buys["amount"].sum() - stock_sells["amount"].sum()
-        total_contributed = deposits["amount"].sum() - withdrawals["amount"].sum()
-        invested_row = {"date": "**Total Invested**", "type": "", "ticker": "", "amount": total_invested}
-        contributed_row = {"date": "**Total Contributed**", "type": "", "ticker": "", "amount": total_contributed}
-        txn_df_display = pd.concat([txn_df_display, pd.DataFrame([invested_row]), pd.DataFrame([contributed_row])], ignore_index=True)
+
         st.dataframe(txn_df_display, width="stretch", hide_index=True)
+
+        # ====================== MANUAL ALLOCATION EDITOR ======================
+        st.markdown("---")
+        st.subheader("✏️ Manual Allocation Editor")
+        st.caption("Select a transaction below to manually adjust how the amount is split between members. Changes are saved permanently.")
+
+        # Create a user-friendly list of transactions
+        txn_options = []
+        for idx, row in txn_df.iterrows():
+            label = f"{row.get('date')} | {row.get('type', 'Unknown')} | {row.get('ticker', '')} | ${abs(row.get('amount', 0)):,.2f}"
+            txn_options.append((label, idx))
+
+        if txn_options:
+            selected_label, selected_idx = st.selectbox(
+                "Select transaction to edit allocation",
+                options=txn_options,
+                format_func=lambda x: x[0]
+            )
+
+            selected_txn = data["transactions"][selected_idx]
+            current_alloc = selected_txn.get("allocations", {})
+
+            st.write(f"**Editing:** {selected_label}")
+
+            with st.form(key=f"edit_alloc_{selected_idx}"):
+                new_allocations = {}
+                cols = st.columns(3)
+
+                for i, member in enumerate(members_list):
+                    with cols[i % 3]:
+                        current_value = current_alloc.get(member, 0.0)
+                        new_allocations[member] = st.number_input(
+                            member,
+                            value=float(current_value),
+                            step=0.01,
+                            format="%.2f",
+                            key=f"alloc_{selected_idx}_{member}"
+                        )
+
+                submitted = st.form_submit_button("💾 Save Manual Allocation", type="primary")
+
+                if submitted:
+                    # Save the manual allocation
+                    data["transactions"][selected_idx]["allocations"] = new_allocations
+                    data["transactions"][selected_idx]["manual_allocation"] = True
+                    save_transactions(data["transactions"])
+                    st.success("✅ Manual allocation saved successfully!")
+                    st.rerun()
+        else:
+            st.info("No transactions available to edit.")
     else:
         st.info("No transactions yet.")
 
@@ -1004,13 +1100,9 @@ with tab6:
     # ====================== GROK ANALYSIS ======================
     st.markdown("### 🔍 Grok Qualitative Analysis Summary")
 
-    # Load from Supabase (persistent)
+    # Load from Supabase using proper helper function
     if "grok_analyses" not in st.session_state:
-        try:
-            res = supabase.table("club_data").select("*").eq("id", 1).execute()
-            st.session_state.grok_analyses = res.data[0]["data"].get("grok_analyses", []) if res.data else []
-        except:
-            st.session_state.grok_analyses = []
+        st.session_state.grok_analyses = load_grok_analyses()
 
     selected = st.multiselect("Select tickers to analyze/update", all_tickers, default=all_tickers[:5])
 
@@ -1024,25 +1116,35 @@ with tab6:
                 fund_data = get_fundamentals(ticker)
                 company_name = fund_data.get("Company", ticker)
 
-                prompt = f"""You are analyzing {display_ticker} for the Equity for All Investment Club (EFAIC). 
-We are looking for moonshots with 2X+ potential over 18-24 months. Be honest about risks.
+                # ====================== IMPROVED PROMPT ======================
+                prompt = f"""You are a senior investment analyst for the Equity for All Investment Club (EFAIC).
 
-Return your response in this exact JSON format (no extra text before or after):
+We are looking for high-conviction moonshot opportunities with realistic 2X+ potential over 18-24 months. Be honest, data-driven, and balanced about both upside and risks.
+
+IMPORTANT INSTRUCTIONS:
+- Return ONLY valid JSON. Do not include any text before or after the JSON.
+- Use clean, professional language. Avoid excessive markdown, emojis, or inconsistent formatting.
+- Be specific with price levels.
+
+Return your response in this exact JSON structure:
+
 {{
   "company": "Full company name",
   "industry": "Main industry",
   "sub_industry": "Specific sub-industry",
-  "best_of_breed": "Yes or No + one sentence reason",
-  "growth_outlook": "Short outlook on industry growth",
+  "best_of_breed": "Yes or No + one short sentence reason",
+  "growth_outlook": "Brief 1-2 sentence outlook on the industry",
   "top_competitors": "List 2-4 main competitors",
-  "current_revenue": "Latest annual revenue (e.g. $2.3B)",
-  "gross_margin": "Gross margin %",
-  "op_margin": "Operating margin %",
-  "catalysts": "Key upcoming catalysts or news",
-  "moat": "What gives this company a competitive advantage?",
-  "recommendation": "Buy / Hold / Avoid + short thesis",
-  "entry_price": "Suggested entry price range",
-  "exit_target": "12-24 month price target"
+  "current_revenue": "Latest annual revenue (example: $2.3B)",
+  "gross_margin": "Gross margin percentage (example: 42%)",
+  "op_margin": "Operating margin percentage",
+  "catalysts": "Key upcoming catalysts or events (1-2 sentences)",
+  "moat": "What gives this company a competitive advantage? (1-2 sentences)",
+  "recommendation": "Buy, Hold, or Avoid",
+  "recommendation_summary": "One clear sentence summarizing your overall stance and why",
+  "entry_price": "Suggested entry price range (example: $18.50 - $22.00)",
+  "exit_target": "12-24 month price target range (example: $45 - $55)",
+  "risks": "Key risks to be aware of (1-2 sentences)"
 }}
 
 Now analyze: {ticker} ({company_name})"""
@@ -1051,8 +1153,8 @@ Now analyze: {ticker} ({company_name})"""
                     response = client.chat.completions.create(
                         model="grok-4-1-fast",
                         messages=[{"role": "user", "content": prompt}],
-                        temperature=0.6,
-                        max_tokens=1400
+                        temperature=0.5,
+                        max_tokens=1600
                     )
                     content = response.choices[0].message.content.strip()
 
@@ -1072,18 +1174,12 @@ Now analyze: {ticker} ({company_name})"""
                 except Exception as e:
                     st.error(f"Error analyzing {ticker}: {e}")
 
-            # Save to Supabase (persistent)
-            try:
-                current = supabase.table("club_data").select("*").eq("id", 1).execute()
-                data_dict = current.data[0]["data"] if current.data else {}
-                data_dict["grok_analyses"] = st.session_state.grok_analyses
-                supabase.table("club_data").upsert({"id": 1, "data": data_dict}).execute()
-                st.success("✅ Saved to Supabase!")
-            except:
-                st.warning("Saved in session only.")
+            # Save using proper helper function
+            save_grok_analyses(st.session_state.grok_analyses)
+            st.success("✅ Analysis saved to Supabase!")
             st.rerun()
 
-    # ====================== GROK SUMMARY TABLE (REAL DATA FROM GROK) ======================
+    # ====================== GROK SUMMARY TABLE ======================
     if st.session_state.grok_analyses:
         latest = {}
         for entry in sorted(st.session_state.grok_analyses, key=lambda x: x.get("timestamp", ""), reverse=True):
@@ -1100,9 +1196,9 @@ Now analyze: {ticker} ({company_name})"""
                     "Company": "N/A",
                     "Industry": "N/A",
                     "Best of Breed": "N/A",
-                    "Growth Outlook": "N/A",
                     "Recommendation": "Needs Analysis",
-                    "Entry / Exit": "N/A",
+                    "Entry Price": "N/A",
+                    "Exit Target": "N/A",
                     "Last Updated": "Never",
                     "Status": "⚠️ Needs Analysis"
                 }
@@ -1112,9 +1208,9 @@ Now analyze: {ticker} ({company_name})"""
                 "Company": p.get("company", "N/A"),
                 "Industry": p.get("industry", "N/A"),
                 "Best of Breed": p.get("best_of_breed", "N/A"),
-                "Growth Outlook": p.get("growth_outlook", "N/A"),
                 "Recommendation": p.get("recommendation", "N/A"),
-                "Entry / Exit": f"{p.get('entry_price', '?')} → {p.get('exit_target', '?')}",
+                "Entry Price": p.get("entry_price", "N/A"),
+                "Exit Target": p.get("exit_target", "N/A"),
                 "Last Updated": entry["timestamp"],
                 "Status": "✅ Analyzed"
             }
@@ -1127,15 +1223,41 @@ Now analyze: {ticker} ({company_name})"""
             st.markdown("#### Watchlist")
             st.dataframe(pd.DataFrame([build_row(t) for t in watchlist_tickers]), width="stretch", hide_index=True)
 
-    # ====================== FULL NARRATIVE (DATED EXPANDERS) ======================
+    # ====================== FULL NARRATIVE WITH CLEAN RECOMMENDATION ======================
     if st.session_state.grok_analyses:
         st.markdown("### 📜 Grok Deep Analysis (Full Narrative)")
+
         for entry in sorted(st.session_state.grok_analyses, key=lambda x: x.get("timestamp", ""), reverse=True):
             token_info = f" ({entry.get('tokens', 'N/A')} tokens)" if entry.get('tokens') else ""
-            with st.expander(f"🔍 {entry['ticker']} — {entry.get('timestamp', '')}{token_info}"):
-                st.markdown(entry["analysis"])
+            ticker = entry['ticker']
+            parsed = entry.get("parsed", {})
 
-    st.caption("v1.0 Beta • Real parsed data from Grok • Persisted in Supabase • TE = T1 Energy (NYSE)")
+            with st.expander(f"🔍 {ticker} — {entry.get('timestamp', '')}{token_info}", expanded=False):
+                
+                # Clean Recommendation Box
+                if parsed:
+                    rec = parsed.get("recommendation", "N/A")
+                    rec_summary = parsed.get("recommendation_summary", "")
+                    entry_price = parsed.get("entry_price", "N/A")
+                    exit_target = parsed.get("exit_target", "N/A")
+
+                    if rec.lower() == "buy":
+                        st.success(f"**Recommendation: BUY**  |  Entry: {entry_price}  →  Target: {exit_target}")
+                    elif rec.lower() == "hold":
+                        st.info(f"**Recommendation: HOLD**  |  Entry: {entry_price}  →  Target: {exit_target}")
+                    elif rec.lower() == "avoid":
+                        st.warning(f"**Recommendation: AVOID**  |  Entry: {entry_price}  →  Target: {exit_target}")
+                    else:
+                        st.write(f"**Recommendation:** {rec}  |  Entry: {entry_price}  →  Target: {exit_target}")
+
+                    if rec_summary:
+                        st.caption(rec_summary)
+
+                # Full raw analysis from Grok
+                st.markdown("**Full Analysis:**")
+                st.markdown(entry.get("analysis", "No analysis available."))
+
+    st.caption("v1.0 Beta • Proper Supabase helpers + Improved prompt • Persisted in Supabase • TE = T1 Energy (NYSE)")
     
 # TAB 7: MEETING SCHEDULER – Full persistence for everything
 with tab7:
@@ -1281,9 +1403,10 @@ with tab8:
     # ==================== MARKET NEWS TAB ====================
     with news_tab:
         st.subheader("📰 Latest Market & Portfolio News")
-        
+        st.caption("News & SEC Filings from the last 60 days • Portfolio prioritized")
+
         finnhub_key = os.environ.get("FINNHUB_API_KEY")
-        
+
         if not finnhub_key:
             st.warning("Add `FINNHUB_API_KEY` to environment variables on Render")
             st.info("Get free key at: https://finnhub.io/register")
@@ -1292,49 +1415,145 @@ with tab8:
                 import finnhub
                 from datetime import datetime, timedelta
                 finnhub_client = finnhub.Client(api_key=finnhub_key)
-                
-                # Use portfolio holdings or popular tickers
-                portfolio_tickers = list(holdings.keys())[:8] if holdings else ["AAPL", "NVDA", "TSLA", "MSFT", "GOOGL"]
-                
-                all_news = []
-                with st.spinner("Fetching latest news..."):
-                    end_date = datetime.now().strftime("%Y-%m-%d")
-                    start_date = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
 
+                portfolio_tickers = list(holdings.keys()) if holdings else []
+                watchlist_tickers = st.session_state.get("watchlist", [])
+
+                end_date = datetime.now().strftime("%Y-%m-%d")
+                start_date = (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d")
+
+                # ====================== PORTFOLIO NEWS ======================
+                st.markdown("### 📊 Portfolio Holdings News")
+
+                portfolio_news = []
+                with st.spinner("Fetching portfolio news..."):
                     for ticker in portfolio_tickers:
                         try:
                             news = finnhub_client.company_news(ticker, _from=start_date, to=end_date)
                             if isinstance(news, list):
-                                all_news.extend(news[:8])
+                                portfolio_news.extend(news[:6])
                         except:
                             continue
-                
-                # Deduplicate news
+
                 seen = set()
-                unique_news = []
-                for item in all_news:
+                unique_portfolio_news = []
+                for item in portfolio_news:
                     headline = item.get('headline')
                     if headline and headline not in seen:
                         seen.add(headline)
-                        unique_news.append(item)
-                
-                if unique_news:
-                    st.success(f"Found {len(unique_news)} recent articles")
-                    for item in unique_news[:15]:
+                        unique_portfolio_news.append(item)
+
+                if unique_portfolio_news:
+                    st.success(f"Found {len(unique_portfolio_news)} recent articles")
+                    for item in unique_portfolio_news[:12]:
                         with st.expander(f"**{item.get('headline', 'No Title')}**"):
                             st.caption(f"{item.get('source', 'Unknown')} • {item.get('datetime', '')}")
                             st.write(item.get('summary', 'No summary available.'))
                             if item.get('url'):
                                 st.markdown(f"[Read full article →]({item['url']})")
                 else:
-                    st.info("No recent news found in the last 30 days. This can happen on free tier — try again later.")
-                
-                if st.button("🔄 Refresh Market News", key="refresh_news"):
+                    st.info("No recent news found for your portfolio holdings.")
+
+                # ====================== WATCHLIST NEWS ======================
+                st.markdown("---")
+                st.markdown("### ⭐ Watchlist News")
+
+                if watchlist_tickers:
+                    watchlist_news = []
+                    with st.spinner("Fetching watchlist news..."):
+                        for ticker in watchlist_tickers:
+                            try:
+                                news = finnhub_client.company_news(ticker, _from=start_date, to=end_date)
+                                if isinstance(news, list):
+                                    watchlist_news.extend(news[:5])
+                            except:
+                                continue
+
+                    seen_watch = set()
+                    unique_watchlist_news = []
+                    for item in watchlist_news:
+                        headline = item.get('headline')
+                        if headline and headline not in seen_watch:
+                            seen_watch.add(headline)
+                            unique_watchlist_news.append(item)
+
+                    if unique_watchlist_news:
+                        st.success(f"Found {len(unique_watchlist_news)} recent articles")
+                        for item in unique_watchlist_news[:10]:
+                            with st.expander(f"**{item.get('headline', 'No Title')}**"):
+                                st.caption(f"{item.get('source', 'Unknown')} • {item.get('datetime', '')}")
+                                st.write(item.get('summary', 'No summary available.'))
+                                if item.get('url'):
+                                    st.markdown(f"[Read full article →]({item['url']})")
+                    else:
+                        st.info("No recent news found for your watchlist.")
+                else:
+                    st.info("Your watchlist is empty.")
+
+                # ====================== NEW: SEC FILINGS ======================
+                st.markdown("---")
+                st.markdown("### 📄 Recent SEC Filings")
+
+                # Portfolio SEC Filings
+                st.markdown("**Portfolio Holdings**")
+                portfolio_filings = []
+                with st.spinner("Fetching portfolio SEC filings..."):
+                    for ticker in portfolio_tickers:
+                        try:
+                            filings = finnhub_client.company_filings(ticker, _from=start_date, to=end_date)
+                            if isinstance(filings, list):
+                                portfolio_filings.extend(filings[:4])  # Limit per ticker
+                        except:
+                            continue
+
+                if portfolio_filings:
+                    for filing in portfolio_filings[:10]:
+                        filing_date = filing.get('filedDate', 'N/A')
+                        filing_type = filing.get('form', 'N/A')
+                        ticker = filing.get('symbol', '')
+                        description = filing.get('description', 'No description')
+
+                        with st.expander(f"**{ticker}** — {filing_type} ({filing_date})"):
+                            st.write(description)
+                            if filing.get('url'):
+                                st.markdown(f"[View Filing →]({filing['url']})")
+                else:
+                    st.info("No recent SEC filings found for your portfolio holdings.")
+
+                # Watchlist SEC Filings
+                if watchlist_tickers:
+                    st.markdown("**Watchlist**")
+                    watchlist_filings = []
+                    with st.spinner("Fetching watchlist SEC filings..."):
+                        for ticker in watchlist_tickers:
+                            try:
+                                filings = finnhub_client.company_filings(ticker, _from=start_date, to=end_date)
+                                if isinstance(filings, list):
+                                    watchlist_filings.extend(filings[:3])
+                            except:
+                                continue
+
+                    if watchlist_filings:
+                        for filing in watchlist_filings[:8]:
+                            filing_date = filing.get('filedDate', 'N/A')
+                            filing_type = filing.get('form', 'N/A')
+                            ticker = filing.get('symbol', '')
+                            description = filing.get('description', 'No description')
+
+                            with st.expander(f"**{ticker}** — {filing_type} ({filing_date})"):
+                                st.write(description)
+                                if filing.get('url'):
+                                    st.markdown(f"[View Filing →]({filing['url']})")
+                    else:
+                        st.info("No recent SEC filings found for your watchlist.")
+
+                # Refresh button
+                if st.button("🔄 Refresh Market News & Filings", key="refresh_news"):
                     st.cache_data.clear()
-                    st.rerun()    
-                    
+                    st.rerun()
+
             except Exception as e:
-                st.error(f"Could not fetch news: {e}")
+                st.error(f"Could not fetch data: {e}")
 
     # ==================== AI AGENTS TAB ====================
     with agents_tab:
