@@ -5,3 +5,13 @@ efa_club_data.json
 efa_change_log.json
 efa_comments.json
 EFA_Club_Full_Report.xlsx
+
+# Secrets
+secrets.toml
+
+# Local data / cache
+local_data/
+
+# Personal backups (we don't need these in the repo)
+efa_club_app - backup.py
+supabase-backups/
