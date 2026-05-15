@@ -946,44 +946,59 @@ with tab4:
 
         # Create a user-friendly list of transactions
         txn_options = []
-        for idx, row in txn_df.iterrows():
-            label = f"{row.get('date')} | {row.get('type', 'Unknown')} | {row.get('ticker', '')} | ${abs(row.get('amount', 0)):,.2f}"
-            txn_options.append((label, idx))
+        for i, txn in enumerate(data["transactions"]):
+            label = f"{txn.get('date')} | {txn.get('type', 'Unknown')} | {txn.get('ticker', '')} | ${abs(txn.get('amount', 0)):,.2f}"
+            txn_options.append((label, i))
 
         if txn_options:
-            selected_label, selected_idx = st.selectbox(
+            selected_label, real_idx = st.selectbox(
                 "Select transaction to edit allocation",
                 options=txn_options,
                 format_func=lambda x: x[0]
             )
 
-            selected_txn = data["transactions"][selected_idx]
+            selected_txn = data["transactions"][real_idx]
             current_alloc = selected_txn.get("allocations", {})
 
             st.write(f"**Editing:** {selected_label}")
 
-            with st.form(key=f"edit_alloc_{selected_idx}"):
+            with st.form(key=f"edit_alloc_{real_idx}"):
+                
+                start_fresh = st.checkbox(
+                    "Start with all members at $0 (recommended for full manual overrides)", 
+                    value=False,
+                    key=f"fresh_{real_idx}"
+                )
+
                 new_allocations = {}
                 cols = st.columns(3)
 
                 for i, member in enumerate(members_list):
                     with cols[i % 3]:
-                        current_value = current_alloc.get(member, 0.0)
+                        if start_fresh:
+                            default_value = 0.0
+                        else:
+                            default_value = current_alloc.get(member, 0.0)
+
                         new_allocations[member] = st.number_input(
                             member,
-                            value=float(current_value),
+                            value=float(default_value),
                             step=0.01,
                             format="%.2f",
-                            key=f"alloc_{selected_idx}_{member}"
+                            key=f"alloc_{real_idx}_{member}"
                         )
 
                 submitted = st.form_submit_button("💾 Save Manual Allocation", type="primary")
 
                 if submitted:
                     # Save the manual allocation
-                    data["transactions"][selected_idx]["allocations"] = new_allocations
-                    data["transactions"][selected_idx]["manual_allocation"] = True
+                    data["transactions"][real_idx]["allocations"] = new_allocations
+                    data["transactions"][real_idx]["manual_allocation"] = True
                     save_transactions(data["transactions"])
+
+                    # === CRITICAL FIX: Reload fresh data from Supabase ===
+                    data["transactions"] = load_transactions()
+
                     st.success("✅ Manual allocation saved successfully!")
                     st.rerun()
         else:
