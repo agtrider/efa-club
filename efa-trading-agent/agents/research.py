@@ -74,13 +74,13 @@ class ResearchAgent:
     def analyze_ticker(self, ticker: str):
         print(f"   🔍 Fetching data for {ticker}...")
 
-        current_price = 250.0
+        current_price = None
         rsi = 52.0
-        sma20 = 245.0
-        sma50 = 240.0
-        sma200 = 230.0
+        sma20 = None
+        sma50 = None
+        sma200 = None
         trend = "neutral"
-        analyst_target = 310.0
+        analyst_target = None
         confidence = 0.55
         macd_data = {"macd": 0.0, "macd_signal": 0.0, "macd_hist": 0.0}
 
@@ -88,14 +88,19 @@ class ResearchAgent:
             stock = yf.Ticker(ticker)
             info = stock.info
 
-            # === REAL CURRENT PRICE (always fresh) ===
-            price = info.get("currentPrice") or info.get("regularMarketPreviousClose") or info.get("previousClose")
+            # === ROBUST CURRENT PRICE FETCH (multiple fallbacks) ===
+            price = info.get("currentPrice") or info.get("regularMarketPrice")
+            if not price or price <= 0:
+                price = info.get("regularMarketPreviousClose") or info.get("previousClose")
+            if not price or price <= 0:
+                hist = stock.history(period="5d", auto_adjust=True)
+                if not hist.empty:
+                    price = float(hist["Close"].iloc[-1])
+
             if price and price > 0:
                 current_price = float(price)
             else:
-                hist5 = stock.history(period="5d", auto_adjust=True)
-                if not hist5.empty:
-                    current_price = float(hist5["Close"].iloc[-1])
+                current_price = 100.0  # safe generic default only as absolute last resort
 
             print(f"   💰 Real price: ${current_price:.2f}")
 
@@ -136,26 +141,34 @@ class ResearchAgent:
                     except:
                         close = None
 
-            # === CALCULATE REAL INDICATORS ===
-            if close is not None and len(close) >= 40:
+            # === CALCULATE REAL INDICATORS (or reasonable fallbacks) ===
+            if close is not None and len(close) >= 14:
                 rsi = self._calculate_rsi(close, 14)
-                sma20 = float(close.rolling(20).mean().iloc[-1])
-                sma50 = float(close.rolling(50).mean().iloc[-1]) if len(close) >= 50 else sma20
-                sma200 = float(close.rolling(200).mean().iloc[-1]) if len(close) >= 200 else sma50
+                sma20 = float(close.rolling(20).mean().iloc[-1]) if len(close) >= 20 else current_price * 0.98
+                sma50 = float(close.rolling(50).mean().iloc[-1]) if len(close) >= 50 else current_price * 0.96
+                sma200 = float(close.rolling(200).mean().iloc[-1]) if len(close) >= 200 else current_price * 0.92
                 macd_data = self._calculate_macd(close)
                 print(f"   📈 RSI={rsi:.1f} | MACD_Hist={macd_data['macd_hist']}")
             else:
-                print(f"   ⚠️ Not enough data for {ticker} - using defaults")
+                print(f"   ⚠️ Not enough data for {ticker} - using price-relative fallbacks")
+                sma20 = current_price * 0.98
+                sma50 = current_price * 0.96
+                sma200 = current_price * 0.92
+                # Keep default rsi/mACD from top of function
 
             # === ANALYST TARGET ===
             try:
                 analyst_target = info.get("targetMeanPrice")
-                if not analyst_target or analyst_target < current_price * 0.5:
-                    analyst_target = current_price * 1.22
+                if not analyst_target or (current_price and analyst_target < current_price * 0.5):
+                    analyst_target = current_price * 1.22 if current_price else 120.0
             except:
-                analyst_target = current_price * 1.22
+                analyst_target = current_price * 1.22 if current_price else 120.0
 
-            # === TREND ===
+            # === TREND (robust to missing sma values) ===
+            sma50 = sma50 or (current_price * 0.96 if current_price else 100)
+            sma200 = sma200 or (current_price * 0.92 if current_price else 95)
+            sma20 = sma20 or (current_price * 0.98 if current_price else 102)
+
             if current_price > sma50 > sma200:
                 trend = "strong_bullish"
             elif current_price > sma20 > sma50:
@@ -167,15 +180,16 @@ class ResearchAgent:
             else:
                 trend = "neutral"
 
-            # === CONFIDENCE ===
+            # === CONFIDENCE (safe even if current_price is low) ===
             confidence = 0.55
             if 40 <= rsi <= 65: confidence += 0.12
             elif rsi < 35 or rsi > 75: confidence -= 0.08
             if trend in ["strong_bullish", "strong_bearish"]: confidence += 0.15
             elif trend == "bullish": confidence += 0.08
-            upside = (analyst_target - current_price) / current_price
-            if 0.10 < upside < 0.45: confidence += 0.10
-            elif upside > 0.60: confidence += 0.05
+            if current_price and analyst_target:
+                upside = (analyst_target - current_price) / current_price
+                if 0.10 < upside < 0.45: confidence += 0.10
+                elif upside > 0.60: confidence += 0.05
             if macd_data["macd_hist"] > 0 and macd_data["macd"] > macd_data["macd_signal"]:
                 confidence += 0.08
             elif macd_data["macd_hist"] < 0: confidence -= 0.05
@@ -183,13 +197,13 @@ class ResearchAgent:
 
             return {
                 "ticker": ticker,
-                "current_price": round(current_price, 2),
+                "current_price": round(current_price or 100, 2),
                 "rsi": round(rsi, 1),
-                "sma_20": round(sma20, 2),
-                "sma_50": round(sma50, 2),
-                "sma_200": round(sma200, 2),
+                "sma_20": round(sma20 or current_price * 0.98 if current_price else 98, 2),
+                "sma_50": round(sma50 or current_price * 0.96 if current_price else 96, 2),
+                "sma_200": round(sma200 or current_price * 0.92 if current_price else 92, 2),
                 "trend": trend,
-                "analyst_target": round(float(analyst_target), 2),
+                "analyst_target": round(float(analyst_target or current_price * 1.22 if current_price else 122), 2),
                 "confidence": confidence,
                 "macd": macd_data["macd"],
                 "macd_signal": macd_data["macd_signal"],
@@ -198,15 +212,16 @@ class ResearchAgent:
 
         except Exception as e:
             print(f"   ❌ Critical error on {ticker}: {e}")
+            safe_price = current_price or 100.0
             return {
                 "ticker": ticker,
-                "current_price": round(current_price, 2),
+                "current_price": round(safe_price, 2),
                 "rsi": 52.0,
-                "sma_20": round(current_price * 0.98, 2),
-                "sma_50": round(current_price * 0.96, 2),
-                "sma_200": round(current_price * 0.92, 2),
+                "sma_20": round(safe_price * 0.98, 2),
+                "sma_50": round(safe_price * 0.96, 2),
+                "sma_200": round(safe_price * 0.92, 2),
                 "trend": "neutral",
-                "analyst_target": round(current_price * 1.22, 2),
+                "analyst_target": round(safe_price * 1.22, 2),
                 "confidence": 0.50,
                 "macd": 0.0,
                 "macd_signal": 0.0,

@@ -1922,7 +1922,12 @@ with tab9:
                     results = []
                     for ticker in portfolio_holdings:
                         try:
-                            context = {"goals": st.session_state.get("investment_goals", {}).get(ticker, {})}
+                            # Pass live price + goals so the agents have good data even if their internal fetch is flaky
+                            live_price = get_price(ticker)
+                            context = {
+                                "goals": st.session_state.get("investment_goals", {}).get(ticker, {}),
+                                "live_price": live_price if live_price > 0 else None
+                            }
                             result = st.session_state.orchestrator.run_cycle(ticker, context)
                             result["quantity"] = portfolio_quantities.get(ticker, 0)
                             results.append(result)

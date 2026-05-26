@@ -16,7 +16,9 @@ class Orchestrator:
         investment_type = goals.get("investment_type", "Core")
         goal_type = goals.get("goal_type", "Long Term (>1 Yr)")
 
-        current_price = research.get("current_price", 250.0)
+        # Prefer live price passed from the main app (more reliable in production)
+        live_price = context.get("live_price") if context else None
+        current_price = live_price if live_price and live_price > 0 else research.get("current_price", 100.0)
         rsi = research.get("rsi", 52)
         sma20 = research.get("sma_20", current_price)
         sma50 = research.get("sma_50", current_price)
