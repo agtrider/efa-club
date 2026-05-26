@@ -1530,7 +1530,8 @@ See you then!
                 "id": len(st.session_state.finalized_meetings) + 1,
                 "date": final_date.strftime('%Y-%m-%d'),
                 "time": final_time,
-                "notes": "Scheduled meeting"
+                "notes": "",
+                "votes": []
             }
             st.session_state.finalized_meetings.append(new_meeting)
             save_finalized_meetings(st.session_state.finalized_meetings)
@@ -1545,7 +1546,100 @@ See you then!
         st.markdown("### Scheduled Meetings")
         for idx, meeting in enumerate(st.session_state.finalized_meetings[:]):
             with st.expander(f"✅ {meeting['date']} at {meeting['time']}", expanded=False):
-                st.write(meeting.get('notes', 'No notes'))
+                # --- Meeting Notes ---
+                st.markdown("**Meeting Notes / Minutes**")
+                current_notes = meeting.get("notes", "")
+                new_notes = st.text_area(
+                    "Add or edit commentary / meeting minutes",
+                    value=current_notes,
+                    key=f"meeting_notes_{idx}",
+                    height=120,
+                    placeholder="Paste meeting minutes, decisions, or discussion points here..."
+                )
+                if st.button("💾 Save Notes", key=f"save_notes_{idx}"):
+                    st.session_state.finalized_meetings[idx]["notes"] = new_notes
+                    save_finalized_meetings(st.session_state.finalized_meetings)
+                    st.success("Notes saved and persisted!")
+                    st.rerun()
+
+                st.divider()
+
+                # --- Voting Section ---
+                st.markdown("**Votes & Group Decisions**")
+
+                if "votes" not in meeting:
+                    st.session_state.finalized_meetings[idx]["votes"] = []
+                    meeting["votes"] = []
+
+                votes = meeting.get("votes", [])
+
+                # Admin: Create new vote
+                if st.session_state.is_admin:
+                    with st.form(key=f"create_vote_form_{idx}"):
+                        vote_question = st.text_input(
+                            "New vote question",
+                            placeholder="e.g. Does the group agree to buy $500 of PLTR at market?"
+                        )
+                        if st.form_submit_button("Create Vote"):
+                            if vote_question.strip():
+                                new_vote = {
+                                    "id": len(votes) + 1,
+                                    "question": vote_question.strip(),
+                                    "votes": {},
+                                    "created": datetime.now().strftime("%Y-%m-%d %H:%M")
+                                }
+                                st.session_state.finalized_meetings[idx]["votes"].append(new_vote)
+                                save_finalized_meetings(st.session_state.finalized_meetings)
+                                st.success("Vote created!")
+                                st.rerun()
+
+                # Display existing votes
+                if votes:
+                    for v_idx, vote in enumerate(votes):
+                        st.markdown(f"**Vote #{vote.get('id', v_idx+1)}:** {vote.get('question', 'No question')}")
+                        
+                        user = st.session_state.username
+                        current_vote = vote.get("votes", {}).get(user)
+
+                        # Voting UI
+                        col_vote, col_tally = st.columns([1, 1])
+                        with col_vote:
+                            choice = st.radio(
+                                "Your vote",
+                                ["Yes", "No"],
+                                index=0 if current_vote == "Yes" else (1 if current_vote == "No" else 0),
+                                key=f"vote_choice_{idx}_{v_idx}",
+                                horizontal=True
+                            )
+                            if st.button("Submit / Update Vote", key=f"submit_vote_{idx}_{v_idx}"):
+                                if "votes" not in st.session_state.finalized_meetings[idx]["votes"][v_idx]:
+                                    st.session_state.finalized_meetings[idx]["votes"][v_idx]["votes"] = {}
+                                st.session_state.finalized_meetings[idx]["votes"][v_idx]["votes"][user] = choice
+                                save_finalized_meetings(st.session_state.finalized_meetings)
+                                st.success("Vote recorded!")
+                                st.rerun()
+
+                        with col_tally:
+                            vote_dict = vote.get("votes", {})
+                            yes = sum(1 for v in vote_dict.values() if v == "Yes")
+                            no = sum(1 for v in vote_dict.values() if v == "No")
+                            st.metric("Yes", yes)
+                            st.metric("No", no)
+                            st.write(f"**Pending**: {11 - (yes + no)}")
+
+                            if yes >= 6:
+                                st.success("✅ This vote has been **APPROVED** by majority (6 out of 11).")
+                            elif yes + no >= 11:
+                                st.warning("This vote did not reach majority approval.")
+
+                        st.caption(f"Created: {vote.get('created', 'N/A')}")
+
+                else:
+                    st.info("No votes created for this meeting yet.")
+
+                st.divider()
+
+                # Change / Cancel buttons (keep existing)
                 col1, col2 = st.columns(2)
                 with col1:
                     if st.button("Change this meeting", key=f"change_meet_{idx}"):
