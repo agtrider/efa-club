@@ -133,7 +133,7 @@ def load_grok_analyses():
 def save_grok_analyses(analyses):
     save_to_supabase("grok_analyses", analyses)
 
-# ====================== LOCAL JSON HELPERS (Only for Price Cache) ======================
+# ====================== LOCAL JSON HELPERS + SUPABASE SYNC FOR PRICE CACHE ======================
 DATA_DIR = Path("local_data")
 DATA_DIR.mkdir(exist_ok=True)
 
@@ -156,10 +156,22 @@ def save_json(filename, data):
         return False
 
 def load_last_prices():
+    """Load last known good prices. Tries Supabase first (shared), falls back to local JSON."""
+    # Try Supabase shared cache
+    supa_prices = load_from_supabase("last_prices", None)
+    if supa_prices and isinstance(supa_prices, dict) and len(supa_prices) > 0:
+        return supa_prices
+    # Fallback to local file (works offline / first run)
     return load_json("last_prices.json", {})
 
 def save_last_prices(prices_dict):
+    """Save to BOTH local JSON (fast) and Supabase (shared across all members/sessions)."""
     save_json("last_prices.json", prices_dict)
+    # Also persist to Supabase so new team members / cloud deploys see recent prices immediately
+    try:
+        save_to_supabase("last_prices", prices_dict)
+    except Exception:
+        pass  # Non-fatal; local copy is still good
 
 # ====================== FORCE FRESH LOAD (Now Safe) ======================
 if "watchlist" not in st.session_state:
@@ -259,57 +271,119 @@ st.title(f"🔥 EFA Investment Club - Welcome, {st.session_state.username}")
 if st.session_state.is_admin:
     st.caption("👑 Admin Mode")
 
-# ====================== ULTRA-ROBUST PRICE FETCHER (Local JSON) ======================
+# ====================== HELPER: LAST KNOWN TRADE PRICE FROM TRANSACTIONS ======================
+def get_last_trade_price(ticker):
+    """Return the most recent fill price recorded in our transactions for this ticker.
+    This serves as an excellent fallback for newly added positions when live yfinance fails.
+    """
+    try:
+        txns = []
+        if "data" in globals() and isinstance(data, dict):
+            txns = data.get("transactions", []) or []
+        else:
+            # Fallback: load directly
+            txns = load_transactions()
+        relevant = []
+        tkr = str(ticker).upper().strip()
+        for t in txns:
+            if str(t.get("ticker", "")).upper().strip() == tkr:
+                p = float(t.get("price", 0) or 0)
+                if p > 0:
+                    relevant.append((str(t.get("date", "")), p, t.get("type", "")))
+        if not relevant:
+            return 0.0
+        # Sort reverse chrono (string sort is acceptable for consistent YYYY-MM-DD or MM/DD/YYYY formats in this app)
+        relevant.sort(key=lambda x: x[0], reverse=True)
+        return float(relevant[0][1])
+    except Exception:
+        return 0.0
+
+
+# ====================== ULTRA-ROBUST PRICE FETCHER (Local JSON + Tx Fallback) ======================
 @st.cache_data(ttl=180)
 def get_price(ticker):
+    """Fetch live/recent price with multiple strategies + last trade price fallback.
+    Critical fix: newly added tickers from CSV transactions will now show a price
+    (at worst their actual execution price from the broker CSV) instead of $0.
+    """
+    tkr = str(ticker).upper().strip()
+    if not tkr or tkr == "CASH" or tkr == "-":
+        return 0.0
+
     try:
-        stock = yf.Ticker(ticker)
-        info = stock.info
-        price = info.get("currentPrice")
-        if price and price > 0:
-            final_price = float(price)
-        else:
-            price = info.get("regularMarketPreviousClose")
-            if price and price > 0:
-                final_price = float(price)
-            else:
-                price = info.get("previousClose")
-                if price and price > 0:
-                    final_price = float(price)
-                else:
-                    for period in ["5d", "1mo", "3mo"]:
-                        hist = stock.history(period=period, progress=False)
-                        if not hist.empty:
-                            price = hist["Close"].iloc[-1]
-                            if price and price > 0:
-                                final_price = float(price)
-                                break
-                    else:
-                        for period in ["1d", "5d", "1mo"]:
-                            df = yf.download(ticker, period=period, progress=False, auto_adjust=True)
-                            if not df.empty:
-                                price = df["Close"].iloc[-1]
-                                if price and price > 0:
-                                    final_price = float(price)
-                                    break
-                        else:
-                            final_price = 0.0
-        
-        # Save to local JSON cache
-        if final_price > 0:
+        # Strategy 1: Lightweight recent close via download (often most reliable in 2026)
+        try:
+            hist = yf.download(tkr, period="1d", progress=False, auto_adjust=True, threads=False)
+            if hist is not None and not hist.empty:
+                price = float(hist["Close"].iloc[-1])
+                if price > 0:
+                    last_prices = load_last_prices()
+                    last_prices[tkr] = {"price": price, "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M")}
+                    save_last_prices(last_prices)
+                    return price
+        except Exception:
+            pass
+
+        # Strategy 2: Ticker.info with broader key search (current + previous close)
+        try:
+            stock = yf.Ticker(tkr)
+            info = getattr(stock, "info", {}) or {}
+            for key in ["currentPrice", "regularMarketPrice", "regularMarketPreviousClose", "previousClose", "lastPrice", "regularMarketLastClose"]:
+                val = info.get(key)
+                if val:
+                    try:
+                        price = float(val)
+                        if price > 0:
+                            last_prices = load_last_prices()
+                            last_prices[tkr] = {"price": price, "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M")}
+                            save_last_prices(last_prices)
+                            return price
+                    except (ValueError, TypeError):
+                        continue
+        except Exception:
+            pass
+
+        # Strategy 3: Multi-period history via Ticker
+        try:
+            stock = yf.Ticker(tkr)
+            for period in ["5d", "1mo", "3mo"]:
+                hist = stock.history(period=period, progress=False, auto_adjust=True)
+                if not hist.empty:
+                    price = float(hist["Close"].iloc[-1])
+                    if price > 0:
+                        last_prices = load_last_prices()
+                        last_prices[tkr] = {"price": price, "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M")}
+                        save_last_prices(last_prices)
+                        return price
+        except Exception:
+            pass
+
+        # Strategy 4 (NEW): Use the actual execution price from our transaction records for this ticker.
+        # This is the key fix for "newly added positions from transaction table".
+        last_trade = get_last_trade_price(tkr)
+        if last_trade > 0:
+            # Still cache it so UI is consistent, but mark it as last-trade
             last_prices = load_last_prices()
-            last_prices[ticker] = {
-                "price": final_price,
-                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M")
-            }
-            save_last_prices(last_prices)
-        
-        return final_price
+            if tkr not in last_prices:  # don't overwrite a previously successful live price
+                last_prices[tkr] = {"price": last_trade, "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M") + " (last trade)"}
+                save_last_prices(last_prices)
+            return last_trade
+
+        # Ultimate local cache fallback (may be stale but better than zero for display)
+        last_prices = load_last_prices()
+        cached = last_prices.get(tkr, {}).get("price", 0.0)
+        if cached > 0:
+            return cached
+
+        return 0.0
 
     except Exception:
-        # Fallback to cached price if yfinance fails
+        # Hard failure path: cached or last trade price
         last_prices = load_last_prices()
-        return last_prices.get(ticker, {}).get("price", 0.0)
+        cached = last_prices.get(tkr, {}).get("price", 0.0)
+        if cached > 0:
+            return cached
+        return get_last_trade_price(tkr)
 
 # ====================== TECHNICAL INDICATORS FOR TAB 6 ======================
 @st.cache_data(ttl=300)
@@ -427,7 +501,7 @@ def auto_allocate_transactions():
 
 # ====================== HOLDINGS (moved early for correct layout) ======================
 df_txn = pd.DataFrame(data.get("transactions", []))
-buys = df_txn[df_txn.get("type", pd.Series([])).str.contains("Buy", na=False)]
+buys = df_txn[df_txn.get("type", pd.Series([])).str.contains("buy", case=False, na=False)]
 holdings = defaultdict(lambda: {"qty": 0.0, "cost_basis": 0.0})
 for _, row in buys.iterrows():
     ticker = str(row.get("ticker", "CASH")).upper()
@@ -448,7 +522,7 @@ def calculate_dynamic_totals():
         commission = float(row.get("commission", 0))
         txn_type = str(row.get("type", "")).lower()
         ticker = str(row.get("ticker", "")).upper()
-        is_stock_buy = "buy" in txn_type and ticker not in ["CASH", ""]
+        is_stock_buy = "buy" in txn_type.lower() and ticker not in ["CASH", ""]
         is_stock_sell = "sell" in txn_type
         is_deposit = "deposit" in txn_type or "opening" in txn_type or "early" in txn_type
         is_withdrawal = "withdrawal" in txn_type
@@ -703,6 +777,25 @@ with tab1:
 with tab2:
     st.subheader("Club Holdings with Live Prices")
     
+    # ====================== FORCE PRICE REFRESH (KEY FIX FOR NEW POSITIONS) ======================
+    col_refresh1, col_refresh2 = st.columns([1, 3])
+    with col_refresh1:
+        if st.button("🔄 Force Refresh Live Prices", type="secondary", use_container_width=True, help="Bypass cache and re-fetch prices for all holdings. Use this after adding new transactions."):
+            get_price.clear()
+            st.success("Price cache cleared — fetching fresh data...")
+            st.rerun()
+    with col_refresh2:
+        st.caption("New tickers from CSV uploads often need a manual refresh the first time due to yfinance rate limits or delays. This button clears the 3-minute Streamlit cache for prices.")
+    
+    # Quick status on cached prices
+    last_prices = load_last_prices()
+    if last_prices:
+        recent = []
+        for tkr, meta in list(last_prices.items())[:3]:
+            ts = meta.get("timestamp", "")
+            recent.append(f"{tkr}:{meta.get('price')}")
+        st.caption(f"Last cached prices sample → {', '.join(recent)} (local JSON + Supabase transactions fallback)")
+    
     # === Holdings Table (unchanged - keeping what works) ===
     rows = []
     total_qty = total_cost = total_market = total_unrealized = 0.0
@@ -743,7 +836,7 @@ with tab2:
     st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
     if total_market == 0:
-        st.warning("⚠️ Live prices are currently showing $0.00. This can happen during non-trading hours or temporary yfinance delays.")
+        st.warning("⚠️ Live prices are currently showing $0.00. Click the 'Force Refresh Live Prices' button above. For newly added tickers we fall back to the actual fill price from your IBKR CSV if live data is temporarily unavailable.")
 
     # ====================== PORTFOLIO PERFORMANCE HISTORY (REAL DATA) ======================
     st.subheader("📈 Portfolio Performance History")
@@ -1693,25 +1786,25 @@ with tab9:
                     st.success("✅ Portfolio Analysis Complete!")
 
     with col2:
-        if st.button("🔄 Refresh Price Cache", type="secondary"):
-            with st.spinner("Refreshing price cache for all tickers..."):
+        if st.button("🔄 Refresh Price Cache (used by Holdings)", type="secondary"):
+            with st.spinner("Clearing price caches and pre-warming..."):
+                try:
+                    get_price.clear()
+                except Exception:
+                    pass
                 portfolio_holdings = st.session_state.get("portfolio_holdings", list(holdings.keys()))
                 watchlist = st.session_state.get("watchlist", [])
                 all_tickers = list(set(portfolio_holdings + watchlist))
                 
-                refreshed = 0
+                warmed = 0
                 for t in all_tickers:
                     try:
-                        stock = yf.Ticker(t)
-                        hist = stock.history(period="1y", auto_adjust=True)
-                        if not hist.empty:
-                            close = hist["Close"] if "Close" in hist.columns else hist.iloc[:, 0]
-                            prices = close.astype(float).dropna().tolist()
-                            # price_cache update logic (if you have it)
-                            refreshed += 1
+                        p = get_price(t)  # will hit live path + update last_prices.json
+                        if p > 0:
+                            warmed += 1
                     except Exception as e:
-                        print(f"Cache refresh failed for {t}: {e}")
-                st.success(f"✅ Price cache refreshed for {refreshed} tickers!")
+                        print(f"Price warm-up failed for {t}: {e}")
+                st.success(f"✅ Cleared Streamlit cache + warmed prices for {warmed}/{len(all_tickers)} tickers. Check Tab 2.")
 
     # Display Portfolio Table
     for item in st.session_state.analysis_history:
