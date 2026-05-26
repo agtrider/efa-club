@@ -1343,49 +1343,51 @@ Now analyze: {ticker} ({company_name})"""
             st.success("✅ Analysis saved to Supabase!")
             st.rerun()
 
-    # ====================== GROK SUMMARY TABLE ======================
+    # ====================== GROK SUMMARY TABLE (always show current portfolio + watchlist) ======================
+    # Build latest analyses if any exist
+    latest = {}
     if st.session_state.grok_analyses:
-        latest = {}
         for entry in sorted(st.session_state.grok_analyses, key=lambda x: x.get("timestamp", ""), reverse=True):
             if entry["ticker"] not in latest:
                 latest[entry["ticker"]] = entry
 
-        st.markdown("### 📋 Grok Qualitative Analysis Summary (Latest)")
+    st.markdown("### 📋 Grok Qualitative Analysis Summary (Latest)")
 
-        def build_row(ticker):
-            entry = latest.get(ticker)
-            if not entry or "parsed" not in entry:
-                return {
-                    "Ticker": ticker,
-                    "Company": "N/A",
-                    "Industry": "N/A",
-                    "Best of Breed": "N/A",
-                    "Recommendation": "Needs Analysis",
-                    "Entry Price": "N/A",
-                    "Exit Target": "N/A",
-                    "Last Updated": "Never",
-                    "Status": "⚠️ Needs Analysis"
-                }
-            p = entry["parsed"]
+    def build_row(ticker):
+        entry = latest.get(ticker)
+        if not entry or "parsed" not in entry:
             return {
                 "Ticker": ticker,
-                "Company": p.get("company", "N/A"),
-                "Industry": p.get("industry", "N/A"),
-                "Best of Breed": p.get("best_of_breed", "N/A"),
-                "Recommendation": p.get("recommendation", "N/A"),
-                "Entry Price": p.get("entry_price", "N/A"),
-                "Exit Target": p.get("exit_target", "N/A"),
-                "Last Updated": entry["timestamp"],
-                "Status": "✅ Analyzed"
+                "Company": "N/A",
+                "Industry": "N/A",
+                "Best of Breed": "N/A",
+                "Recommendation": "Needs Analysis",
+                "Entry Price": "N/A",
+                "Exit Target": "N/A",
+                "Last Updated": "Never",
+                "Status": "⚠️ Needs Analysis"
             }
+        p = entry["parsed"]
+        return {
+            "Ticker": ticker,
+            "Company": p.get("company", "N/A"),
+            "Industry": p.get("industry", "N/A"),
+            "Best of Breed": p.get("best_of_breed", "N/A"),
+            "Recommendation": p.get("recommendation", "N/A"),
+            "Entry Price": p.get("entry_price", "N/A"),
+            "Exit Target": p.get("exit_target", "N/A"),
+            "Last Updated": entry["timestamp"],
+            "Status": "✅ Analyzed"
+        }
 
-        if portfolio_tickers:
-            st.markdown("#### Portfolio Holdings")
-            st.dataframe(pd.DataFrame([build_row(t) for t in portfolio_tickers]), width="stretch", hide_index=True)
+    # Always show tables using the exact current portfolio and watchlist (matching Tab 2)
+    if portfolio_tickers:
+        st.markdown("#### Portfolio Holdings")
+        st.dataframe(pd.DataFrame([build_row(t) for t in portfolio_tickers]), width="stretch", hide_index=True)
 
-        if watchlist_tickers:
-            st.markdown("#### Watchlist")
-            st.dataframe(pd.DataFrame([build_row(t) for t in watchlist_tickers]), width="stretch", hide_index=True)
+    if watchlist_tickers:
+        st.markdown("#### Watchlist")
+        st.dataframe(pd.DataFrame([build_row(t) for t in watchlist_tickers]), width="stretch", hide_index=True)
 
     # ====================== FULL NARRATIVE WITH CLEAN RECOMMENDATION ======================
     if st.session_state.grok_analyses:
