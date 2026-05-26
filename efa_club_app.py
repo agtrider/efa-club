@@ -274,14 +274,13 @@ if st.session_state.is_admin:
 # ====================== HELPER: LAST KNOWN TRADE PRICE FROM TRANSACTIONS ======================
 def get_last_trade_price(ticker):
     """Return the most recent fill price recorded in our transactions for this ticker.
-    This serves as an excellent fallback for newly added positions when live yfinance fails.
+    This is the safety net for newly added positions when live yfinance is down or rate-limited.
     """
     try:
         txns = []
         if "data" in globals() and isinstance(data, dict):
             txns = data.get("transactions", []) or []
         else:
-            # Fallback: load directly
             txns = load_transactions()
         relevant = []
         tkr = str(ticker).upper().strip()
@@ -289,87 +288,114 @@ def get_last_trade_price(ticker):
             if str(t.get("ticker", "")).upper().strip() == tkr:
                 p = float(t.get("price", 0) or 0)
                 if p > 0:
-                    relevant.append((str(t.get("date", "")), p, t.get("type", "")))
+                    relevant.append((str(t.get("date", "")), p))
         if not relevant:
             return 0.0
-        # Sort reverse chrono (string sort is acceptable for consistent YYYY-MM-DD or MM/DD/YYYY formats in this app)
         relevant.sort(key=lambda x: x[0], reverse=True)
         return float(relevant[0][1])
     except Exception:
         return 0.0
 
 
-# ====================== ULTRA-ROBUST PRICE FETCHER (Local JSON + Tx Fallback) ======================
-@st.cache_data(ttl=180)
-def get_price(ticker):
-    """Fetch live/recent price with multiple strategies + last trade price fallback.
-    Critical fix: newly added tickers from CSV transactions will now show a price
-    (at worst their actual execution price from the broker CSV) instead of $0.
+def get_price_with_source(ticker):
+    """Returns (price, source_label) for the diagnostics column in Tab 2.
+    This helps you see whether you're getting real yfinance data or the CSV fallback.
     """
     tkr = str(ticker).upper().strip()
-    if not tkr or tkr == "CASH" or tkr == "-":
+    if not tkr or tkr in ("CASH", "-"):
+        return 0.0, "zero"
+
+    # Pass the current refresh token so this benefits from Force Refresh
+    token = st.session_state.get("price_refresh_token")
+    price = get_price(tkr, _refresh_token=token)
+
+    last_prices = load_last_prices()
+    meta = last_prices.get(tkr, {})
+    ts = meta.get("timestamp", "") or ""
+
+    if "CSV fill" in ts:
+        return price, "CSV fill price (yfinance gave nothing)"
+    elif "yfinance" in ts:
+        return price, "yfinance"
+    elif price > 0:
+        return price, "cached (old)"
+    else:
+        return price, "zero"
+
+
+# ====================== PRICE FETCHER (restored closer to original reliable yfinance logic + fixes) ======================
+@st.cache_data(ttl=180)
+def get_price(ticker, _refresh_token=None):
+    """
+    Uses yfinance the way it was before the heavy changes.
+    Tries hard for current/recent prices via .info and history.
+    The CSV last-trade is only a last-resort fallback for truly new tickers when yfinance returns nothing.
+    _refresh_token is used by the Force Refresh button to bust the Streamlit cache.
+    """
+    tkr = str(ticker).upper().strip()
+    if not tkr or tkr in ("CASH", "-"):
         return 0.0
 
     try:
-        # Strategy 1: Lightweight recent close via download (often most reliable in 2026)
-        try:
-            hist = yf.download(tkr, period="1d", progress=False, auto_adjust=True, threads=False)
-            if hist is not None and not hist.empty:
-                price = float(hist["Close"].iloc[-1])
-                if price > 0:
-                    last_prices = load_last_prices()
-                    last_prices[tkr] = {"price": price, "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M")}
-                    save_last_prices(last_prices)
-                    return price
-        except Exception:
-            pass
+        stock = yf.Ticker(tkr)
+        info = getattr(stock, "info", {}) or {}
 
-        # Strategy 2: Ticker.info with broader key search (current + previous close)
-        try:
-            stock = yf.Ticker(tkr)
-            info = getattr(stock, "info", {}) or {}
-            for key in ["currentPrice", "regularMarketPrice", "regularMarketPreviousClose", "previousClose", "lastPrice", "regularMarketLastClose"]:
-                val = info.get(key)
-                if val:
-                    try:
-                        price = float(val)
-                        if price > 0:
-                            last_prices = load_last_prices()
-                            last_prices[tkr] = {"price": price, "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M")}
-                            save_last_prices(last_prices)
-                            return price
-                    except (ValueError, TypeError):
-                        continue
-        except Exception:
-            pass
+        # Original-style priority: currentPrice first, then other market fields
+        price = info.get("currentPrice")
+        if price and price > 0:
+            final_price = float(price)
+        else:
+            price = info.get("regularMarketPrice") or info.get("regularMarketPreviousClose")
+            if price and price > 0:
+                final_price = float(price)
+            else:
+                price = info.get("previousClose")
+                if price and price > 0:
+                    final_price = float(price)
+                else:
+                    # History fallbacks (original approach)
+                    for period in ["5d", "1mo", "3mo"]:
+                        hist = stock.history(period=period, progress=False)
+                        if not hist.empty:
+                            price = hist["Close"].iloc[-1]
+                            if price and price > 0:
+                                final_price = float(price)
+                                break
+                    else:
+                        # Last yf.download attempt (kept for robustness)
+                        for period in ["1d", "5d"]:
+                            df = yf.download(tkr, period=period, progress=False, auto_adjust=True)
+                            if not df.empty:
+                                price = df["Close"].iloc[-1]
+                                if price and price > 0:
+                                    final_price = float(price)
+                                    break
+                        else:
+                            final_price = 0.0
 
-        # Strategy 3: Multi-period history via Ticker
-        try:
-            stock = yf.Ticker(tkr)
-            for period in ["5d", "1mo", "3mo"]:
-                hist = stock.history(period=period, progress=False, auto_adjust=True)
-                if not hist.empty:
-                    price = float(hist["Close"].iloc[-1])
-                    if price > 0:
-                        last_prices = load_last_prices()
-                        last_prices[tkr] = {"price": price, "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M")}
-                        save_last_prices(last_prices)
-                        return price
-        except Exception:
-            pass
+        # If we got a good price from yfinance, save and return it (fresh)
+        if final_price > 0:
+            last_prices = load_last_prices()
+            last_prices[tkr] = {
+                "price": final_price,
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M") + " (yfinance)"
+            }
+            save_last_prices(last_prices)
+            return final_price
 
-        # Strategy 4 (NEW): Use the actual execution price from our transaction records for this ticker.
-        # This is the key fix for "newly added positions from transaction table".
+        # Only if yfinance gave us nothing at all, fall back to the actual fill price from the transaction CSV.
+        # This was the original intent for newly added positions.
         last_trade = get_last_trade_price(tkr)
         if last_trade > 0:
-            # Still cache it so UI is consistent, but mark it as last-trade
             last_prices = load_last_prices()
-            if tkr not in last_prices:  # don't overwrite a previously successful live price
-                last_prices[tkr] = {"price": last_trade, "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M") + " (last trade)"}
-                save_last_prices(last_prices)
+            last_prices[tkr] = {
+                "price": last_trade,
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M") + " (CSV fill - yfinance unavailable)"
+            }
+            save_last_prices(last_prices)
             return last_trade
 
-        # Ultimate local cache fallback (may be stale but better than zero for display)
+        # Final very old cache only if everything else failed
         last_prices = load_last_prices()
         cached = last_prices.get(tkr, {}).get("price", 0.0)
         if cached > 0:
@@ -378,12 +404,12 @@ def get_price(ticker):
         return 0.0
 
     except Exception:
-        # Hard failure path: cached or last trade price
+        # On hard error, last resort CSV price or old cache
+        last_trade = get_last_trade_price(tkr)
+        if last_trade > 0:
+            return last_trade
         last_prices = load_last_prices()
-        cached = last_prices.get(tkr, {}).get("price", 0.0)
-        if cached > 0:
-            return cached
-        return get_last_trade_price(tkr)
+        return last_prices.get(tkr, {}).get("price", 0.0)
 
 # ====================== TECHNICAL INDICATORS FOR TAB 6 ======================
 @st.cache_data(ttl=300)
@@ -508,7 +534,11 @@ for _, row in buys.iterrows():
     if ticker == "CASH":
         continue
     qty = float(row.get("quantity", 0))
-    cost = abs(float(row.get("amount", 0))) + abs(float(row.get("commission", 0)))
+    px = float(row.get("price", 0))
+    comm = float(row.get("commission", 0))
+    # Use explicit qty * price + commission. This avoids double-counting when "amount"
+    # is already the Net Amount (which typically already includes commission effect).
+    cost = abs(qty * px) + abs(comm)
     holdings[ticker]["qty"] += qty
     holdings[ticker]["cost_basis"] += cost
 
@@ -551,7 +581,8 @@ for m in data["members"]:
 save_members(data["members"])
 
 # ====================== PORTFOLIO SUMMARY CALCULATIONS (safe version) ======================
-prices = {ticker: get_price(ticker) for ticker in holdings}
+_refresh_token = st.session_state.get("price_refresh_token")
+prices = {ticker: get_price(ticker, _refresh_token=_refresh_token) for ticker in holdings}
 total_market_value = sum(h["qty"] * prices.get(t, 0.0) for t, h in holdings.items())
 total_cost_basis = sum(h["cost_basis"] for h in holdings.values())
 overall_return = ((total_market_value / total_cost_basis) - 1) * 100 if total_cost_basis > 0 else 0.0
@@ -777,33 +808,65 @@ with tab1:
 with tab2:
     st.subheader("Club Holdings with Live Prices")
     
-    # ====================== FORCE PRICE REFRESH (KEY FIX FOR NEW POSITIONS) ======================
+    # ====================== FORCE PRICE REFRESH (AGGRESSIVE LIVE YFINANCE) ======================
     col_refresh1, col_refresh2 = st.columns([1, 3])
     with col_refresh1:
-        if st.button("🔄 Force Refresh Live Prices", type="secondary", use_container_width=True, help="Bypass cache and re-fetch prices for all holdings. Use this after adding new transactions."):
-            get_price.clear()
-            st.success("Price cache cleared — fetching fresh data...")
+        if st.button("🔄 Force Refresh Live Prices (from yfinance)", type="primary", use_container_width=True, 
+                     help="Clears cache and forces fresh calls to yfinance for current prices. Use this when you want real-time quotes."):
+            # Proper cache busting using a changing token
+            if "price_refresh_token" not in st.session_state:
+                st.session_state.price_refresh_token = 0
+            st.session_state.price_refresh_token += 1
+            try:
+                get_price.clear()
+            except Exception:
+                pass
+            st.success("Cache cleared — forcing fresh yfinance calls for live prices...")
             st.rerun()
     with col_refresh2:
-        st.caption("New tickers from CSV uploads often need a manual refresh the first time due to yfinance rate limits or delays. This button clears the 3-minute Streamlit cache for prices.")
+        st.caption("Restored to yfinance logic similar to the original working version. Force Refresh now properly busts the cache. Price Source column shows exactly what was used.")
     
-    # Quick status on cached prices
+    # Quick status
     last_prices = load_last_prices()
     if last_prices:
         recent = []
-        for tkr, meta in list(last_prices.items())[:3]:
+        for tkr, meta in list(last_prices.items())[:4]:
             ts = meta.get("timestamp", "")
             recent.append(f"{tkr}:{meta.get('price')}")
-        st.caption(f"Last cached prices sample → {', '.join(recent)} (local JSON + Supabase transactions fallback)")
+        st.caption(f"Last cached prices sample → {', '.join(recent)}")
+    st.caption("**Important**: If you see 'CSV fill price' or old cached values after Force Refresh, it means yfinance calls are failing in this environment (rate limits, network, or temporary Yahoo issues). The app then safely falls back instead of showing $0.")
     
-    # === Holdings Table (unchanged - keeping what works) ===
+    # ====================== COST BASIS VERIFICATION (for debugging) ======================
+    with st.expander("🔍 Cost Basis Calculation Details (click to verify)", expanded=False):
+        st.caption("Cost Basis = Σ (quantity × price + commission) from all Buy transactions for that ticker. This should match the actual cash you deployed.")
+        st.caption("If these numbers look wrong, check the raw 'amount' and 'commission' columns in your uploaded CSV for that ticker.")
+        
+        debug_rows = []
+        for ticker in holdings.keys():
+            tbuys = [r for r in data.get("transactions", []) 
+                     if str(r.get("ticker","")).upper() == ticker and "buy" in str(r.get("type","")).lower()]
+            total_qty = sum(float(r.get("quantity",0)) for r in tbuys)
+            total_cost_calc = sum( abs(float(r.get("quantity",0))) * abs(float(r.get("price",0))) + abs(float(r.get("commission",0))) for r in tbuys )
+            debug_rows.append({
+                "Ticker": ticker,
+                "Buy rows": len(tbuys),
+                "Total Qty": round(total_qty, 4),
+                "Calculated Cost Basis": round(total_cost_calc, 2),
+                "Current UI Cost Basis": round(holdings[ticker]["cost_basis"], 2)
+            })
+        st.dataframe(pd.DataFrame(debug_rows), width="stretch", hide_index=True)
+    
+    # === Holdings Table with price source diagnostics ===
     rows = []
     total_qty = total_cost = total_market = total_unrealized = 0.0
     for ticker, h in holdings.items():
         qty = h["qty"]
         cost_basis = h["cost_basis"]
         avg_price = cost_basis / qty if qty > 0 else 0
-        live_price = prices.get(ticker, 0.0)
+
+        # Use diagnostic version so we can show the user exactly where the price came from
+        live_price, price_source = get_price_with_source(ticker)
+
         market_value = qty * live_price
         unrealized = market_value - cost_basis
         pct_return = ((market_value / cost_basis) - 1) * 100 if cost_basis > 0 else 0
@@ -813,6 +876,7 @@ with tab2:
             "Avg Purchase Price": f"${avg_price:,.4f}",
             "Cost Basis": f"${cost_basis:,.2f}",
             "Live Price": f"${live_price:,.2f}",
+            "Price Source": price_source,
             "Market Value": f"${market_value:,.2f}",
             "Unrealized Gain/Loss": f"${unrealized:,.2f}",
             "% Return": f"{pct_return:.2f}%"
@@ -829,6 +893,7 @@ with tab2:
         "Avg Purchase Price": "—",
         "Cost Basis": f"${total_cost:,.2f}",
         "Live Price": "—",
+        "Price Source": "—",
         "Market Value": f"${total_market:,.2f}",
         "Unrealized Gain/Loss": f"${total_unrealized:,.2f}",
         "% Return": f"{total_pct_return:.2f}%"
@@ -836,7 +901,7 @@ with tab2:
     st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
     if total_market == 0:
-        st.warning("⚠️ Live prices are currently showing $0.00. Click the 'Force Refresh Live Prices' button above. For newly added tickers we fall back to the actual fill price from your IBKR CSV if live data is temporarily unavailable.")
+        st.warning("⚠️ Live prices are currently showing $0.00. Click the Force Refresh button. yfinance is sometimes unreliable — the app falls back to your CSV fill price for positions instead of showing zero.")
 
     # ====================== PORTFOLIO PERFORMANCE HISTORY (REAL DATA) ======================
     st.subheader("📈 Portfolio Performance History")
