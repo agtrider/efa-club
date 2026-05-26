@@ -299,13 +299,12 @@ def get_last_trade_price(ticker):
 
 def get_price_with_source(ticker):
     """Returns (price, source_label) for the diagnostics column in Tab 2.
-    This helps you see whether you're getting real yfinance data or the CSV fallback.
+    Shows clearly where the price came from and whether it is current or EOD.
     """
     tkr = str(ticker).upper().strip()
     if not tkr or tkr in ("CASH", "-"):
         return 0.0, "zero"
 
-    # Pass the current refresh token so this benefits from Force Refresh
     token = st.session_state.get("price_refresh_token")
     price = get_price(tkr, _refresh_token=token)
 
@@ -314,23 +313,31 @@ def get_price_with_source(ticker):
     ts = meta.get("timestamp", "") or ""
 
     if "CSV fill" in ts:
-        return price, "CSV fill price (yfinance gave nothing)"
+        return price, "CSV fill (first time - no yfinance data yet)"
+    elif "previous close" in ts.lower() or "EOD" in ts:
+        return price, "Previous Close / EOD (yfinance)"
     elif "yfinance" in ts:
-        return price, "yfinance"
+        return price, "Current / Intraday (yfinance)"
     elif price > 0:
-        return price, "cached (old)"
+        return price, "Cached (last good yfinance price)"
     else:
         return price, "zero"
 
 
-# ====================== PRICE FETCHER (restored closer to original reliable yfinance logic + fixes) ======================
+# ====================== PRICE FETCHER - PERSISTENT LATEST YFINANCE PRICE ======================
 @st.cache_data(ttl=180)
 def get_price(ticker, _refresh_token=None):
     """
-    Uses yfinance the way it was before the heavy changes.
-    Tries hard for current/recent prices via .info and history.
-    The CSV last-trade is only a last-resort fallback for truly new tickers when yfinance returns nothing.
-    _refresh_token is used by the Force Refresh button to bust the Streamlit cache.
+    Goal: Always try to return the most recent price available from yfinance.
+    - During market hours: prefers current / intraday price.
+    - After hours / weekends: falls back to previous close from yfinance.
+    - If yfinance temporarily fails or returns nothing: falls back to our persisted cache
+      (the last good price we successfully pulled from yfinance).
+    - Only uses the CSV transaction fill price as a last resort for brand-new tickers
+      that have never had any yfinance data.
+
+    This ensures prices "persist" with the latest known yfinance value instead of
+    reverting to old transaction prices or going to zero.
     """
     tkr = str(ticker).upper().strip()
     if not tkr or tkr in ("CASH", "-"):
@@ -340,76 +347,93 @@ def get_price(ticker, _refresh_token=None):
         stock = yf.Ticker(tkr)
         info = getattr(stock, "info", {}) or {}
 
-        # Original-style priority: currentPrice first, then other market fields
-        price = info.get("currentPrice")
-        if price and price > 0:
-            final_price = float(price)
-        else:
-            price = info.get("regularMarketPrice") or info.get("regularMarketPreviousClose")
-            if price and price > 0:
-                final_price = float(price)
-            else:
-                price = info.get("previousClose")
-                if price and price > 0:
-                    final_price = float(price)
-                else:
-                    # History fallbacks (original approach)
-                    for period in ["5d", "1mo", "3mo"]:
-                        hist = stock.history(period=period, progress=False)
-                        if not hist.empty:
-                            price = hist["Close"].iloc[-1]
-                            if price and price > 0:
-                                final_price = float(price)
-                                break
-                    else:
-                        # Last yf.download attempt (kept for robustness)
-                        for period in ["1d", "5d"]:
-                            df = yf.download(tkr, period=period, progress=False, auto_adjust=True)
-                            if not df.empty:
-                                price = df["Close"].iloc[-1]
-                                if price and price > 0:
-                                    final_price = float(price)
-                                    break
-                        else:
-                            final_price = 0.0
+        final_price = 0.0
+        source_note = ""
 
-        # If we got a good price from yfinance, save and return it (fresh)
+        # --- 1. Try to get a usable price directly from yfinance ---
+        # Prioritize current market price when available
+        for key in ["currentPrice", "regularMarketPrice"]:
+            val = info.get(key)
+            if val and float(val) > 0:
+                final_price = float(val)
+                source_note = " (yfinance current)"
+                break
+
+        # If no current price, try previous close / last close (very important after hours)
+        if final_price == 0:
+            for key in ["regularMarketPreviousClose", "previousClose"]:
+                val = info.get(key)
+                if val and float(val) > 0:
+                    final_price = float(val)
+                    source_note = " (yfinance previous close / EOD)"
+                    break
+
+        # History fallback if .info didn't give us anything good
+        if final_price == 0:
+            for period in ["5d", "1mo"]:
+                try:
+                    hist = stock.history(period=period, progress=False)
+                    if not hist.empty:
+                        price = float(hist["Close"].iloc[-1])
+                        if price > 0:
+                            final_price = price
+                            source_note = f" (yfinance {period} close)"
+                            break
+                except Exception:
+                    continue
+
+        # Last-ditch yfinance download attempt
+        if final_price == 0:
+            try:
+                df = yf.download(tkr, period="5d", progress=False, auto_adjust=True)
+                if not df.empty:
+                    price = float(df["Close"].iloc[-1])
+                    if price > 0:
+                        final_price = price
+                        source_note = " (yfinance download close)"
+            except Exception:
+                pass
+
+        # --- 2. If we got a good price from yfinance, persist it and return it ---
         if final_price > 0:
             last_prices = load_last_prices()
             last_prices[tkr] = {
                 "price": final_price,
-                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M") + " (yfinance)"
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M") + source_note
             }
             save_last_prices(last_prices)
             return final_price
 
-        # Only if yfinance gave us nothing at all, fall back to the actual fill price from the transaction CSV.
-        # This was the original intent for newly added positions.
+        # --- 3. yfinance gave us nothing usable right now ---
+        # Fall back to our own persisted cache (last successful yfinance price)
+        last_prices = load_last_prices()
+        cached = last_prices.get(tkr, {})
+        cached_price = cached.get("price", 0.0)
+        if cached_price > 0:
+            # We have a previous good yfinance price — use it and keep the old timestamp
+            # so the UI can show it was from an earlier successful fetch.
+            return cached_price
+
+        # --- 4. Absolute last resort: CSV transaction fill price ---
+        # Only for new tickers that have never had any yfinance price saved.
         last_trade = get_last_trade_price(tkr)
         if last_trade > 0:
-            last_prices = load_last_prices()
             last_prices[tkr] = {
                 "price": last_trade,
-                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M") + " (CSV fill - yfinance unavailable)"
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M") + " (CSV fill - no yfinance data yet)"
             }
             save_last_prices(last_prices)
             return last_trade
 
-        # Final very old cache only if everything else failed
+        return 0.0
+
+    except Exception:
+        # On total failure, still prefer our persisted yfinance cache over CSV price
         last_prices = load_last_prices()
         cached = last_prices.get(tkr, {}).get("price", 0.0)
         if cached > 0:
             return cached
-
-        return 0.0
-
-    except Exception:
-        # On hard error, last resort CSV price or old cache
-        last_trade = get_last_trade_price(tkr)
-        if last_trade > 0:
-            return last_trade
-        last_prices = load_last_prices()
-        return last_prices.get(tkr, {}).get("price", 0.0)
+        return get_last_trade_price(tkr)
 
 # ====================== TECHNICAL INDICATORS FOR TAB 6 ======================
 @st.cache_data(ttl=300)
@@ -824,7 +848,7 @@ with tab2:
             st.success("Cache cleared — forcing fresh yfinance calls for live prices...")
             st.rerun()
     with col_refresh2:
-        st.caption("Restored to yfinance logic similar to the original working version. Force Refresh now properly busts the cache. Price Source column shows exactly what was used.")
+        st.caption("Price Persistence Logic: Always prefers the latest price from yfinance. After hours or when yfinance is flaky, it falls back to the last successfully cached yfinance price (not the CSV fill price).")
     
     # Quick status
     last_prices = load_last_prices()
@@ -834,7 +858,7 @@ with tab2:
             ts = meta.get("timestamp", "")
             recent.append(f"{tkr}:{meta.get('price')}")
         st.caption(f"Last cached prices sample → {', '.join(recent)}")
-    st.caption("**Important**: If you see 'CSV fill price' or old cached values after Force Refresh, it means yfinance calls are failing in this environment (rate limits, network, or temporary Yahoo issues). The app then safely falls back instead of showing $0.")
+    st.caption("**After Hours Behavior**: The Force Refresh button will still work. It will return the most recent yfinance close it has (usually previous EOD). The CSV transaction price is now only used for completely new tickers that have never been priced by yfinance.")
     
     # ====================== COST BASIS VERIFICATION (for debugging) ======================
     with st.expander("🔍 Cost Basis Calculation Details (click to verify)", expanded=False):
@@ -901,7 +925,7 @@ with tab2:
     st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
     if total_market == 0:
-        st.warning("⚠️ Live prices are currently showing $0.00. Click the Force Refresh button. yfinance is sometimes unreliable — the app falls back to your CSV fill price for positions instead of showing zero.")
+        st.warning("⚠️ Prices showing $0.00. This usually means we have no yfinance data and no prior cached price for these tickers. Try Force Refresh. After hours it will use the last known yfinance close.")
 
     # ====================== PORTFOLIO PERFORMANCE HISTORY (REAL DATA) ======================
     st.subheader("📈 Portfolio Performance History")
