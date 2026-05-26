@@ -566,6 +566,11 @@ for _, row in buys.iterrows():
     holdings[ticker]["qty"] += qty
     holdings[ticker]["cost_basis"] += cost
 
+# Always keep these fresh for Tab 9 (and anywhere else that needs current portfolio)
+if "portfolio_holdings" not in st.session_state or st.session_state.get("portfolio_holdings") != list(holdings.keys()):
+    st.session_state.portfolio_holdings = list(holdings.keys())
+    st.session_state.portfolio_quantities = {ticker: h["qty"] for ticker, h in holdings.items()}
+
 # ====================== DYNAMIC TOTALS ======================
 def calculate_dynamic_totals():
     df_txn = pd.DataFrame(data["transactions"])
@@ -980,19 +985,28 @@ with tab2:
 
     goals = st.session_state.investment_goals
 
-    for ticker in list(holdings.keys()):
+    # Always show an expander for every current holding (so new tickers immediately get goal settings)
+    current_portfolio_tickers = list(holdings.keys())
+    for ticker in current_portfolio_tickers:
         with st.expander(f"🎯 {ticker} Goals", expanded=False):
+            existing = goals.get(ticker, {})
             col_a, col_b = st.columns(2)
             with col_a:
                 goal_type = st.selectbox("Investment Goal", 
-                    ["Short Term Gain (<1 Yr)", "Long Term (>1 Yr)"], key=f"gt_{ticker}")
+                    ["Short Term Gain (<1 Yr)", "Long Term (>1 Yr)"], 
+                    index=0 if existing.get("goal_type") == "Short Term Gain (<1 Yr)" else 1,
+                    key=f"gt_{ticker}")
                 inv_type = st.selectbox("Investment Type", 
-                    ["Moonshot (≤10% of portfolio)", "Core (≤25% of portfolio)"], key=f"it_{ticker}")
+                    ["Moonshot (≤10% of portfolio)", "Core (≤25% of portfolio)"], 
+                    index=0 if existing.get("investment_type") == "Moonshot (≤10% of portfolio)" else 1,
+                    key=f"it_{ticker}")
             with col_b:
                 target_return = st.number_input("Expected 1-Year Return Target (%)", 
-                    min_value=0.0, value=50.0, step=5.0, key=f"er_{ticker}")
+                    min_value=0.0, value=existing.get("expected_1yr_return", 50.0), step=5.0, key=f"er_{ticker}")
                 strategy = st.selectbox("EFAIC Strategy", 
-                    ["Accumulation", "Buy and Hold", "Ad-Hoc"], key=f"es_{ticker}")
+                    ["Accumulation", "Buy and Hold", "Ad-Hoc"], 
+                    index=["Accumulation", "Buy and Hold", "Ad-Hoc"].index(existing.get("efaic_strategy", "Accumulation")) if existing.get("efaic_strategy") in ["Accumulation", "Buy and Hold", "Ad-Hoc"] else 0,
+                    key=f"es_{ticker}")
 
             if st.button(f"Save Goals for {ticker}", key=f"save_{ticker}"):
                 goals[ticker] = {
@@ -1002,17 +1016,27 @@ with tab2:
                     "efaic_strategy": strategy,
                     "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M")
                 }
-                save_investment_goals(goals)          # ← Now saves to Supabase
+                save_investment_goals(goals)
                 st.success(f"✅ Saved for {ticker} (shared with all members)")
                 st.rerun()
 
-    if goals:
-        st.markdown("**Investment Goals Summary**")
-        st.dataframe(pd.DataFrame.from_dict(goals, orient='index'), width="stretch")
+    # Investment Goals Summary: Always show every current portfolio ticker
+    st.markdown("**Investment Goals Summary**")
+    summary_data = {}
+    for ticker in current_portfolio_tickers:
+        if ticker in goals:
+            summary_data[ticker] = goals[ticker]
+        else:
+            summary_data[ticker] = {
+                "goal_type": "Not set",
+                "investment_type": "Not set",
+                "expected_1yr_return": "Not set",
+                "efaic_strategy": "Not set",
+                "last_updated": "—"
+            }
+    st.dataframe(pd.DataFrame.from_dict(summary_data, orient='index'), width="stretch")
 
     st.caption("Goals defined here will influence agent recommendations in Tab 9")
-    st.session_state.portfolio_holdings = list(holdings.keys())
-    st.session_state.portfolio_quantities = {ticker: h["qty"] for ticker, h in holdings.items()}
 
 # TAB 3: Member Performance
 with tab3:
@@ -1916,8 +1940,9 @@ with tab9:
                 st.error("Orchestrator not initialized. Please re-initialize above.")
             else:
                 with st.spinner("Analyzing your real portfolio holdings..."):
-                    portfolio_holdings = st.session_state.get("portfolio_holdings", list(holdings.keys()))
-                    portfolio_quantities = st.session_state.get("portfolio_quantities", {ticker: h["qty"] for ticker, h in holdings.items()})
+                    # Always prefer the most up-to-date list from Tab 2 / top-level holdings
+                    portfolio_holdings = st.session_state.get("portfolio_holdings") or list(holdings.keys())
+                    portfolio_quantities = st.session_state.get("portfolio_quantities") or {ticker: h["qty"] for ticker, h in holdings.items()}
 
                     results = []
                     for ticker in portfolio_holdings:
@@ -1949,7 +1974,7 @@ with tab9:
                     get_price.clear()
                 except Exception:
                     pass
-                portfolio_holdings = st.session_state.get("portfolio_holdings", list(holdings.keys()))
+                portfolio_holdings = st.session_state.get("portfolio_holdings") or list(holdings.keys())
                 watchlist = st.session_state.get("watchlist", [])
                 all_tickers = list(set(portfolio_holdings + watchlist))
                 
