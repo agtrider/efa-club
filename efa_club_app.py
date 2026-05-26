@@ -847,39 +847,6 @@ with tab2:
                 pass
             st.success("Cache cleared — forcing fresh yfinance calls for live prices...")
             st.rerun()
-    with col_refresh2:
-        st.caption("Price Persistence Logic: Always prefers the latest price from yfinance. After hours or when yfinance is flaky, it falls back to the last successfully cached yfinance price (not the CSV fill price).")
-    
-    # Quick status
-    last_prices = load_last_prices()
-    if last_prices:
-        recent = []
-        for tkr, meta in list(last_prices.items())[:4]:
-            ts = meta.get("timestamp", "")
-            recent.append(f"{tkr}:{meta.get('price')}")
-        st.caption(f"Last cached prices sample → {', '.join(recent)}")
-    st.caption("**After Hours Behavior**: The Force Refresh button will still work. It will return the most recent yfinance close it has (usually previous EOD). The CSV transaction price is now only used for completely new tickers that have never been priced by yfinance.")
-    
-    # ====================== COST BASIS VERIFICATION (for debugging) ======================
-    with st.expander("🔍 Cost Basis Calculation Details (click to verify)", expanded=False):
-        st.caption("Cost Basis = Σ (quantity × price + commission) from all Buy transactions for that ticker. This should match the actual cash you deployed.")
-        st.caption("If these numbers look wrong, check the raw 'amount' and 'commission' columns in your uploaded CSV for that ticker.")
-        
-        debug_rows = []
-        for ticker in holdings.keys():
-            tbuys = [r for r in data.get("transactions", []) 
-                     if str(r.get("ticker","")).upper() == ticker and "buy" in str(r.get("type","")).lower()]
-            total_qty = sum(float(r.get("quantity",0)) for r in tbuys)
-            total_cost_calc = sum( abs(float(r.get("quantity",0))) * abs(float(r.get("price",0))) + abs(float(r.get("commission",0))) for r in tbuys )
-            debug_rows.append({
-                "Ticker": ticker,
-                "Buy rows": len(tbuys),
-                "Total Qty": round(total_qty, 4),
-                "Calculated Cost Basis": round(total_cost_calc, 2),
-                "Current UI Cost Basis": round(holdings[ticker]["cost_basis"], 2)
-            })
-        st.dataframe(pd.DataFrame(debug_rows), width="stretch", hide_index=True)
-    
     # === Holdings Table with price source diagnostics ===
     rows = []
     total_qty = total_cost = total_market = total_unrealized = 0.0
