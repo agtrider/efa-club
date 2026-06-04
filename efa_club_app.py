@@ -121,6 +121,44 @@ def load_availability_responses():
 def save_availability_responses(responses_dict):
     save_to_supabase("availability_responses", responses_dict)
 
+def normalize_availability_responses(responses, proposals):
+    """Migrate old flat {username: [slots]} format to per-poll {poll_key: {username: [slots]}}.
+
+    Smart attach: prefer the poll whose week dates appear in the legacy slot strings.
+    Falls back to the oldest poll (proposals[0]). This ensures:
+    - Existing proposals keep their historical availability data.
+    - Any newly created polls (even if created right after deploy before migration runs) start at zero.
+    """
+    if not responses or not isinstance(responses, dict):
+        return {}
+    sample = next(iter(responses.values()), None)
+    if isinstance(sample, (list, tuple)):
+        # Old flat format detected. Collect all legacy slot strings.
+        legacy_slots = []
+        for lst in responses.values():
+            if isinstance(lst, (list, tuple)):
+                legacy_slots.extend(lst)
+        legacy_text = " ".join(str(s) for s in legacy_slots)
+
+        target_key = None
+        if proposals:
+            # 1. Try to find a poll whose week_start or week_end appears in the legacy slots.
+            for poll in proposals:
+                ws = poll.get("week_start", "")
+                we = poll.get("week_end", "")
+                if (ws and ws in legacy_text) or (we and we in legacy_text):
+                    target_key = str(poll.get("id", proposals.index(poll) + 1))
+                    break
+            # 2. Fallback: attach legacy data to the oldest poll so previous proposals keep their data.
+            if target_key is None:
+                first_poll = proposals[0]
+                target_key = str(first_poll.get("id", 1))
+            # Build the migrated dict with legacy under the chosen key only.
+            # Newer polls (higher ids) will not receive it → they start at zero responses.
+            return {target_key: responses}
+        return {}
+    return responses
+
 def load_finalized_meetings():
     return load_from_supabase("finalized_meetings", [])
 
@@ -1223,8 +1261,9 @@ with tab6:
     st.subheader("📉 Advanced Technical Analysis & Grok Moonshot Insights")
     st.caption("Real-time fundamentals from yfinance • Persistent Grok qualitative analysis")
 
-    # ====================== GET TICKERS ======================
-    portfolio_tickers = [ticker for ticker in holdings.keys() if ticker != "CASH"]
+    # ====================== GET TICKERS (robust - always match Tab 2 + full watchlist) ======================
+    # Use the reliably updated session_state from top-level if available, otherwise fall back to current holdings
+    portfolio_tickers = st.session_state.get("portfolio_holdings") or [ticker for ticker in holdings.keys() if ticker != "CASH"]
     watchlist_tickers = st.session_state.get("watchlist", [])
     all_tickers = list(dict.fromkeys(portfolio_tickers + watchlist_tickers))
 
@@ -1458,9 +1497,35 @@ with tab7:
     if "meeting_proposals" not in st.session_state:
         st.session_state.meeting_proposals = load_polls()
     if "availability_responses" not in st.session_state:
-        st.session_state.availability_responses = load_availability_responses()
+        raw_av = load_availability_responses()
+        st.session_state.availability_responses = normalize_availability_responses(
+            raw_av, st.session_state.meeting_proposals
+        )
+        # Persist migration immediately so Supabase has the new per-poll structure
+        sample = next(iter(raw_av.values()), None) if raw_av else None
+        if raw_av and isinstance(sample, (list, tuple)):
+            print("[MIGRATION] Old flat availability_responses detected. Migrated to per-poll format and saved to Supabase.")
+            print("[MIGRATION] Proposals at migration time:", [p.get("id") for p in st.session_state.meeting_proposals])
+            # Safety: also stash the original flat data under a legacy key in case recovery is ever needed.
+            try:
+                if supabase is not None:
+                    current = supabase.table("club_data").select("data").eq("id", 1).execute()
+                    data_dict = current.data[0].get("data", {}) if current.data else {}
+                    data_dict["availability_responses_legacy"] = raw_av
+                    data_dict["availability_responses"] = st.session_state.availability_responses
+                    supabase.table("club_data").upsert({"id": 1, "data": data_dict}).execute()
+                    print("[MIGRATION] Legacy flat copy saved under 'availability_responses_legacy' key.")
+                else:
+                    save_availability_responses(st.session_state.availability_responses)
+            except Exception as e:
+                print("[MIGRATION] Extra legacy backup failed, doing normal save:", e)
+                save_availability_responses(st.session_state.availability_responses)
     if "finalized_meetings" not in st.session_state:
         st.session_state.finalized_meetings = load_finalized_meetings()
+
+    # Safety: ensure availability_responses is always a dict (new per-poll shape)
+    if not isinstance(st.session_state.get("availability_responses"), dict):
+        st.session_state.availability_responses = {}
 
     if "poll_email_text" not in st.session_state:
         st.session_state.poll_email_text = ""
@@ -1508,25 +1573,32 @@ Thank you!
         st.markdown("### Current Availability Polls")
         for i, poll in enumerate(st.session_state.meeting_proposals):
             with st.expander(f"📅 Week of {poll['week_start']} – {poll['week_end']} (created {poll.get('created', '')})", expanded=False):
+                poll_key = str(poll.get("id", i))
+                poll_responses = st.session_state.availability_responses.get(poll_key, {})
                 date_options = [f"{date.strftime('%Y-%m-%d')} {time}" for date in pd.date_range(poll['week_start'], poll['week_end']) for time in poll.get('times', [])]
+                user_selections = poll_responses.get(st.session_state.username, [])
+                valid_user_selections = [s for s in user_selections if s in date_options]
                 selected = st.multiselect(
                     f"Select your available dates & times for this poll",
                     date_options,
+                    default=valid_user_selections,
                     key=f"poll_{i}_{poll.get('id', i)}"
                 )
                 if st.button("Submit / Update Availability", key=f"submit_{i}"):
-                    st.session_state.availability_responses[st.session_state.username] = selected
+                    if poll_key not in st.session_state.availability_responses:
+                        st.session_state.availability_responses[poll_key] = {}
+                    st.session_state.availability_responses[poll_key][st.session_state.username] = selected
                     save_availability_responses(st.session_state.availability_responses)
                     st.success("✅ Availability updated!")
                     st.rerun()
                 st.markdown("**Availability Summary for this poll**")
-                responded = list(st.session_state.availability_responses.keys())
+                responded = list(poll_responses.keys())
                 all_members = list(MEMBER_CREDENTIALS.keys())
                 pending = [m for m in all_members if m not in responded]
                 st.write(f"**Responded ({len(responded)})**: {', '.join(responded) if responded else 'None yet'}")
                 if pending:
                     st.write(f"**Still pending ({len(pending)})**: {', '.join(pending)}")
-                poll_selections = [s for selections in st.session_state.availability_responses.values() for s in selections if any(d in s for d in [poll['week_start'], poll['week_end']])]
+                poll_selections = [s for selections in poll_responses.values() for s in selections]
                 if poll_selections:
                     top_slots = Counter(poll_selections).most_common(3)
                     st.write("**Top 3 best slots for this poll**:")
