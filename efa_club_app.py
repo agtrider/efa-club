@@ -47,6 +47,16 @@ if supabase:
 else:
     st.sidebar.error("❌ Supabase NOT Connected (running local only)")
 
+# ====================== FINNHUB CLIENT (for reliable current quotes - already used for news/filings in Tab 8) ======================
+FINNHUB_CLIENT = None
+try:
+    _fh_key = os.environ.get("FINNHUB_API_KEY")
+    if _fh_key:
+        import finnhub
+        FINNHUB_CLIENT = finnhub.Client(api_key=_fh_key)
+except Exception:
+    FINNHUB_CLIENT = None
+
 # ====================== SUPABASE PERSISTENCE HELPERS ======================
 def load_from_supabase(key, default=None):
     if supabase is None:
@@ -366,9 +376,25 @@ def get_price_with_source(ticker):
             label += f" {as_of}"
         return price, label
 
-    # Legacy timestamp string fallback (for old cached entries)
+    # Legacy timestamp string fallback (for old cached entries) + recognition of new sources
     if "CSV fill" in ts:
         return price, "CSV fill (first time - no yfinance data yet)"
+    elif "finnhub" in ts.lower():
+        if "previous close" in ts.lower() or "EOD" in ts:
+            label = "Final Daily Close (EOD, finnhub)"
+        else:
+            label = "Live (finnhub)"
+        if as_of:
+            label += f" {as_of}"
+        return price, label
+    elif "fast_info" in ts.lower():
+        if "previous" in ts.lower() or "EOD" in ts:
+            label = "Final Daily Close (EOD, fast_info)"
+        else:
+            label = "Live / Most Recent (fast_info)"
+        if as_of:
+            label += f" {as_of}"
+        return price, label
     elif "previous close" in ts.lower() or "EOD" in ts or "daily close" in ts.lower():
         label = "Final Daily Close (EOD)"
         if as_of:
@@ -380,10 +406,9 @@ def get_price_with_source(ticker):
             label += f" {as_of}"
         return price, label
     elif "yfinance" in ts:
-        # Generic yfinance hit — be conservative
         return price, "Last yfinance price (check time)"
     elif price > 0:
-        return price, "Cached (last good yfinance price)"
+        return price, "Cached (last good price)"
     else:
         return price, "zero"
 
@@ -392,17 +417,17 @@ def get_price_with_source(ticker):
 @st.cache_data(ttl=180)
 def get_price(ticker, _refresh_token=None):
     """
-    Returns the best available price for the ticker, with behavior that matches club needs:
-    - During regular US market hours (Mon-Fri 9:30-16:00 ET): returns the most recent price
-      available (prefers 1-minute intraday last close when possible).
-    - After hours, weekends, or closed: returns the FINAL DAILY (EOD / previous close) price.
-    - On any successful fresh yfinance value: persists it (Supabase + local JSON) so the
-      value survives deploys, restarts, and rate limits. Old good prices are never lost.
-    - Falls back to the persisted last good yfinance price (preserving its original timestamp/source).
-    - Absolute last resort (new tickers only): the last fill price from transactions.
-
-    The market-hours branch + richer metadata in the cache ensures "after hours = final daily price"
-    while "during hours = freshest price", and the Price Source column in Tab 2 is trustworthy.
+    Returns the best available price, preferring reliable sources first:
+    - Layered fetch (research from 2025 GitHub yfinance issues + common coder patterns):
+      1. Finnhub quote (if FINNHUB_API_KEY present) — proper API, much more reliable on Render/cloud than yf scraping.
+      2. yfinance fast_info (last_price / previous_close) — widely recommended on SO/GitHub when .info is empty.
+      3. Market-aware history: 1m intraday (open) or previous/daily close (closed).
+      4. Broader yf fallbacks (5d/1mo history, download).
+    - During market hours: most recent (live) price.
+    - After hours/closed: final daily (EOD) price.
+    - Any successful fresh price >0 is persisted to Supabase+local (overwrites old "last saved").
+    - If all fresh sources fail this run: falls back to last persisted good price (this is the "still showing last saved" behavior).
+    - Only uses transaction fill as absolute last resort for completely new tickers.
     """
     tkr = str(ticker).upper().strip()
     if not tkr or tkr in ("CASH", "-"):
@@ -411,53 +436,78 @@ def get_price(ticker, _refresh_token=None):
     try:
         stock = yf.Ticker(tkr)
         info = getattr(stock, "info", {}) or {}
+        fi = {}
+        try:
+            fi = getattr(stock, "fast_info", {}) or {}
+        except Exception:
+            fi = {}
 
         final_price = 0.0
         source_note = ""
         is_open = is_us_market_open()
 
-        # --- 1. Choose fetch strategy based on market status ---
-        if is_open:
-            # During trading hours: aggressively seek the most recent price
-            # Best signal for "live" is often the last 1-minute bar
+        # --- 1. Prefer reliable quote source first (Finnhub if available - proper API, far more stable on Render/cloud than yf scraping per 2025 GitHub reports & rate limit issues) ---
+        if FINNHUB_CLIENT is not None:
             try:
-                hist = stock.history(period="1d", interval="1m", progress=False, prepost=False)
-                if not hist.empty:
-                    price = float(hist["Close"].iloc[-1])
-                    if price > 0:
-                        final_price = price
-                        source_note = " (yfinance intraday 1m)"
+                q = FINNHUB_CLIENT.quote(tkr)
+                if q:
+                    if is_open:
+                        c = q.get("c")
+                        if c and float(c) > 0:
+                            final_price = float(c)
+                            source_note = " (finnhub live)"
+                    else:
+                        pc = q.get("pc")
+                        if pc and float(pc) > 0:
+                            final_price = float(pc)
+                            source_note = " (finnhub previous close / EOD)"
             except Exception:
                 pass
 
-            if final_price == 0:
-                for key in ["currentPrice", "regularMarketPrice"]:
-                    val = info.get(key)
-                    if val and float(val) > 0:
-                        final_price = float(val)
-                        source_note = " (yfinance current)"
-                        break
-        else:
-            # Market closed / after hours / weekend: explicitly want the FINAL DAILY close
-            for key in ["regularMarketPreviousClose", "previousClose"]:
-                val = info.get(key)
-                if val and float(val) > 0:
-                    final_price = float(val)
-                    source_note = " (yfinance previous close / EOD)"
-                    break
+        # --- 2. Fast path via fast_info (widely recommended on GitHub/SO 2025 for last_price + previous_close when full .info is empty/rate-limited) ---
+        if final_price == 0:
+            if is_open:
+                p = fi.get("last_price") or fi.get("regularMarketPrice")
+                if p and float(p) > 0:
+                    final_price = float(p)
+                    source_note = " (yfinance fast_info last_price)"
+            else:
+                p = fi.get("previous_close") or fi.get("regularMarketPreviousClose")
+                if p and float(p) > 0:
+                    final_price = float(p)
+                    source_note = " (yfinance fast_info previous_close / EOD)"
 
-            if final_price == 0:
+        # --- 3. Market-aware yfinance history (1m for live during hours; daily/prev for final EOD) ---
+        if final_price == 0:
+            if is_open:
                 try:
-                    hist = stock.history(period="5d", interval="1d", progress=False)
+                    hist = stock.history(period="1d", interval="1m", progress=False, prepost=False)
                     if not hist.empty:
                         price = float(hist["Close"].iloc[-1])
                         if price > 0:
                             final_price = price
-                            source_note = " (yfinance daily close - EOD)"
+                            source_note = " (yfinance intraday 1m)"
                 except Exception:
                     pass
+            else:
+                for key in ["regularMarketPreviousClose", "previousClose"]:
+                    val = info.get(key)
+                    if val and float(val) > 0:
+                        final_price = float(val)
+                        source_note = " (yfinance previous close / EOD)"
+                        break
+                if final_price == 0:
+                    try:
+                        hist = stock.history(period="5d", interval="1d", progress=False)
+                        if not hist.empty:
+                            price = float(hist["Close"].iloc[-1])
+                            if price > 0:
+                                final_price = price
+                                source_note = " (yfinance daily close - EOD)"
+                    except Exception:
+                        pass
 
-        # Common fallbacks if the preferred path above gave nothing
+        # --- 4. Broader fallbacks (common patterns from GitHub issues & 2025 tutorials) ---
         if final_price == 0:
             for period in ["5d", "1mo"]:
                 try:
@@ -482,7 +532,7 @@ def get_price(ticker, _refresh_token=None):
             except Exception:
                 pass
 
-        # --- 2. Persist successful yfinance result (dual write: Supabase + local) ---
+        # --- 5. Persist any successful fresh price (this overwrites the "last saved" in Supabase) ---
         if final_price > 0:
             last_prices = load_last_prices()
             src_type = "intraday" if is_open else "eod_close"
@@ -495,15 +545,15 @@ def get_price(ticker, _refresh_token=None):
             save_last_prices(last_prices)
             return final_price
 
-        # --- 3. yfinance gave nothing usable → fall back to our persisted cache ---
-        # (the last *successful* yfinance price we ever got, with its original timestamp/source)
+        # --- 6. All fresh attempts (Finnhub + fast_info + yf) failed this run → return the last successfully saved price from Supabase ---
+        # This is exactly why you're still seeing the old cached "last saved" price.
         last_prices = load_last_prices()
         cached = last_prices.get(tkr, {})
         cached_price = cached.get("price", 0.0)
         if cached_price > 0:
             return cached_price
 
-        # --- 4. Absolute last resort: CSV transaction fill price (new tickers only) ---
+        # --- 7. Absolute last resort (brand new tickers) ---
         last_trade = get_last_trade_price(tkr)
         if last_trade > 0:
             last_prices[tkr] = {
@@ -518,7 +568,6 @@ def get_price(ticker, _refresh_token=None):
         return 0.0
 
     except Exception:
-        # Total failure: still prefer persisted yfinance cache over transaction price
         last_prices = load_last_prices()
         cached = last_prices.get(tkr, {}).get("price", 0.0)
         if cached > 0:
