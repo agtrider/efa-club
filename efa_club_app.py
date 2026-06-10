@@ -7,6 +7,7 @@ import numpy as np
 import json
 from pathlib import Path
 import os
+import pytz
 
 # ====================== PAGE CONFIG ======================
 st.set_page_config(
@@ -337,7 +338,8 @@ def get_last_trade_price(ticker):
 
 def get_price_with_source(ticker):
     """Returns (price, source_label) for the diagnostics column in Tab 2.
-    Shows clearly where the price came from and whether it is current or EOD.
+    Clearly distinguishes live intraday (during market hours) vs final daily EOD close (after hours).
+    Uses enhanced metadata when available (backward compatible with old cache entries).
     """
     tkr = str(ticker).upper().strip()
     if not tkr or tkr in ("CASH", "-"):
@@ -349,13 +351,37 @@ def get_price_with_source(ticker):
     last_prices = load_last_prices()
     meta = last_prices.get(tkr, {})
     ts = meta.get("timestamp", "") or ""
+    src = meta.get("source", "").lower()
+    as_of = meta.get("as_of", "")
 
+    # New structured source takes precedence
+    if src == "eod_close" or "eod" in src:
+        label = "Final Daily Close (EOD)"
+        if as_of:
+            label += f" {as_of}"
+        return price, label
+    if src == "intraday":
+        label = "Live / Most Recent (Intraday)"
+        if as_of:
+            label += f" {as_of}"
+        return price, label
+
+    # Legacy timestamp string fallback (for old cached entries)
     if "CSV fill" in ts:
         return price, "CSV fill (first time - no yfinance data yet)"
-    elif "previous close" in ts.lower() or "EOD" in ts:
-        return price, "Previous Close / EOD (yfinance)"
+    elif "previous close" in ts.lower() or "EOD" in ts or "daily close" in ts.lower():
+        label = "Final Daily Close (EOD)"
+        if as_of:
+            label += f" {as_of}"
+        return price, label
+    elif "intraday" in ts.lower() or "current" in ts.lower():
+        label = "Live / Most Recent (Intraday)"
+        if as_of:
+            label += f" {as_of}"
+        return price, label
     elif "yfinance" in ts:
-        return price, "Current / Intraday (yfinance)"
+        # Generic yfinance hit — be conservative
+        return price, "Last yfinance price (check time)"
     elif price > 0:
         return price, "Cached (last good yfinance price)"
     else:
@@ -366,16 +392,17 @@ def get_price_with_source(ticker):
 @st.cache_data(ttl=180)
 def get_price(ticker, _refresh_token=None):
     """
-    Goal: Always try to return the most recent price available from yfinance.
-    - During market hours: prefers current / intraday price.
-    - After hours / weekends: falls back to previous close from yfinance.
-    - If yfinance temporarily fails or returns nothing: falls back to our persisted cache
-      (the last good price we successfully pulled from yfinance).
-    - Only uses the CSV transaction fill price as a last resort for brand-new tickers
-      that have never had any yfinance data.
+    Returns the best available price for the ticker, with behavior that matches club needs:
+    - During regular US market hours (Mon-Fri 9:30-16:00 ET): returns the most recent price
+      available (prefers 1-minute intraday last close when possible).
+    - After hours, weekends, or closed: returns the FINAL DAILY (EOD / previous close) price.
+    - On any successful fresh yfinance value: persists it (Supabase + local JSON) so the
+      value survives deploys, restarts, and rate limits. Old good prices are never lost.
+    - Falls back to the persisted last good yfinance price (preserving its original timestamp/source).
+    - Absolute last resort (new tickers only): the last fill price from transactions.
 
-    This ensures prices "persist" with the latest known yfinance value instead of
-    reverting to old transaction prices or going to zero.
+    The market-hours branch + richer metadata in the cache ensures "after hours = final daily price"
+    while "during hours = freshest price", and the Price Source column in Tab 2 is trustworthy.
     """
     tkr = str(ticker).upper().strip()
     if not tkr or tkr in ("CASH", "-"):
@@ -387,18 +414,31 @@ def get_price(ticker, _refresh_token=None):
 
         final_price = 0.0
         source_note = ""
+        is_open = is_us_market_open()
 
-        # --- 1. Try to get a usable price directly from yfinance ---
-        # Prioritize current market price when available
-        for key in ["currentPrice", "regularMarketPrice"]:
-            val = info.get(key)
-            if val and float(val) > 0:
-                final_price = float(val)
-                source_note = " (yfinance current)"
-                break
+        # --- 1. Choose fetch strategy based on market status ---
+        if is_open:
+            # During trading hours: aggressively seek the most recent price
+            # Best signal for "live" is often the last 1-minute bar
+            try:
+                hist = stock.history(period="1d", interval="1m", progress=False, prepost=False)
+                if not hist.empty:
+                    price = float(hist["Close"].iloc[-1])
+                    if price > 0:
+                        final_price = price
+                        source_note = " (yfinance intraday 1m)"
+            except Exception:
+                pass
 
-        # If no current price, try previous close / last close (very important after hours)
-        if final_price == 0:
+            if final_price == 0:
+                for key in ["currentPrice", "regularMarketPrice"]:
+                    val = info.get(key)
+                    if val and float(val) > 0:
+                        final_price = float(val)
+                        source_note = " (yfinance current)"
+                        break
+        else:
+            # Market closed / after hours / weekend: explicitly want the FINAL DAILY close
             for key in ["regularMarketPreviousClose", "previousClose"]:
                 val = info.get(key)
                 if val and float(val) > 0:
@@ -406,7 +446,18 @@ def get_price(ticker, _refresh_token=None):
                     source_note = " (yfinance previous close / EOD)"
                     break
 
-        # History fallback if .info didn't give us anything good
+            if final_price == 0:
+                try:
+                    hist = stock.history(period="5d", interval="1d", progress=False)
+                    if not hist.empty:
+                        price = float(hist["Close"].iloc[-1])
+                        if price > 0:
+                            final_price = price
+                            source_note = " (yfinance daily close - EOD)"
+                except Exception:
+                    pass
+
+        # Common fallbacks if the preferred path above gave nothing
         if final_price == 0:
             for period in ["5d", "1mo"]:
                 try:
@@ -420,7 +471,6 @@ def get_price(ticker, _refresh_token=None):
                 except Exception:
                     continue
 
-        # Last-ditch yfinance download attempt
         if final_price == 0:
             try:
                 df = yf.download(tkr, period="5d", progress=False, auto_adjust=True)
@@ -432,33 +482,35 @@ def get_price(ticker, _refresh_token=None):
             except Exception:
                 pass
 
-        # --- 2. If we got a good price from yfinance, persist it and return it ---
+        # --- 2. Persist successful yfinance result (dual write: Supabase + local) ---
         if final_price > 0:
             last_prices = load_last_prices()
+            src_type = "intraday" if is_open else "eod_close"
             last_prices[tkr] = {
                 "price": final_price,
-                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M") + source_note
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M") + source_note,
+                "source": src_type,
+                "as_of": datetime.now().strftime("%Y-%m-%d")
             }
             save_last_prices(last_prices)
             return final_price
 
-        # --- 3. yfinance gave us nothing usable right now ---
-        # Fall back to our own persisted cache (last successful yfinance price)
+        # --- 3. yfinance gave nothing usable → fall back to our persisted cache ---
+        # (the last *successful* yfinance price we ever got, with its original timestamp/source)
         last_prices = load_last_prices()
         cached = last_prices.get(tkr, {})
         cached_price = cached.get("price", 0.0)
         if cached_price > 0:
-            # We have a previous good yfinance price — use it and keep the old timestamp
-            # so the UI can show it was from an earlier successful fetch.
             return cached_price
 
-        # --- 4. Absolute last resort: CSV transaction fill price ---
-        # Only for new tickers that have never had any yfinance price saved.
+        # --- 4. Absolute last resort: CSV transaction fill price (new tickers only) ---
         last_trade = get_last_trade_price(tkr)
         if last_trade > 0:
             last_prices[tkr] = {
                 "price": last_trade,
-                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M") + " (CSV fill - no yfinance data yet)"
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M") + " (CSV fill - no yfinance data yet)",
+                "source": "csv_fill",
+                "as_of": datetime.now().strftime("%Y-%m-%d")
             }
             save_last_prices(last_prices)
             return last_trade
@@ -466,12 +518,99 @@ def get_price(ticker, _refresh_token=None):
         return 0.0
 
     except Exception:
-        # On total failure, still prefer our persisted yfinance cache over CSV price
+        # Total failure: still prefer persisted yfinance cache over transaction price
         last_prices = load_last_prices()
         cached = last_prices.get(tkr, {}).get("price", 0.0)
         if cached > 0:
             return cached
         return get_last_trade_price(tkr)
+
+
+# ====================== MARKET HOURS + AUTO SNAPSHOT HELPERS ======================
+def is_us_market_open():
+    """Return True only during regular US equity trading hours (Mon-Fri 9:30-16:00 ET)."""
+    try:
+        et = pytz.timezone("US/Eastern")
+        now_et = datetime.now(et)
+        if now_et.weekday() >= 5:  # Saturday=5, Sunday=6
+            return False
+        open_time = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+        close_time = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
+        return open_time <= now_et < close_time
+    except Exception:
+        return False
+
+
+def get_last_trading_day_str():
+    """
+    Returns the YYYY-MM-DD string for the most recent completed (or completing) trading day.
+    Used for automatic daily portfolio snapshot recording so users don't have to remember.
+    """
+    try:
+        et = pytz.timezone("US/Eastern")
+        now = datetime.now(et)
+        if now.weekday() >= 5:
+            # Weekend → attribute to prior Friday
+            offset = now.weekday() - 4
+            target = now - timedelta(days=offset)
+        elif now.hour >= 16:
+            # After regular close on a weekday → today is the trading day
+            target = now
+        else:
+            # Weekday before/during market hours → last completed trading day
+            target = now - timedelta(days=1)
+            while target.weekday() >= 5:
+                target -= timedelta(days=1)
+        return target.strftime("%Y-%m-%d")
+    except Exception:
+        # Safe fallback to calendar day
+        return datetime.now().strftime("%Y-%m-%d")
+
+
+def auto_record_eod_snapshot_if_needed(current_portfolio_nav, current_securities_value,
+                                       current_cash_balance, cumulative_invested,
+                                       current_return_on_invested):
+    """
+    Automatically records a daily portfolio snapshot (for the two performance graphs)
+    when the market is closed / after hours / on weekends, if a snapshot for the
+    relevant trading day does not already exist.
+
+    This prevents "forgotten days". The manual "Record" button is still available.
+    Uses the (now EOD-aware) current prices so after-hours snapshots are final daily closes.
+    """
+    if supabase is None:
+        return  # cannot persist reliably
+    try:
+        portfolio_history = load_from_supabase("portfolio_history", []) or []
+        target_date = get_last_trading_day_str()
+
+        existing_dates = [str(entry.get("date")) for entry in portfolio_history]
+        if target_date in existing_dates:
+            return
+
+        # Only auto-record if we have real data
+        if current_portfolio_nav is None or current_portfolio_nav <= 0:
+            return
+
+        new_snapshot = {
+            "date": target_date,
+            "portfolio_nav": round(current_portfolio_nav, 2),
+            "securities_value": round(current_securities_value, 2),
+            "cash_balance": round(current_cash_balance, 2),
+            "cumulative_invested": round(cumulative_invested, 2),
+            "return_on_invested": round(current_return_on_invested, 4),
+            "auto_recorded": True
+        }
+        portfolio_history.append(new_snapshot)
+        portfolio_history = sorted(portfolio_history, key=lambda x: x["date"])
+        save_to_supabase("portfolio_history", portfolio_history)
+
+        # One-time UI notification this run
+        if "just_auto_recorded_date" not in st.session_state:
+            st.session_state.just_auto_recorded_date = target_date
+    except Exception as e:
+        print(f"[auto snapshot] Error: {e}")
+
 
 # ====================== TECHNICAL INDICATORS FOR TAB 6 ======================
 @st.cache_data(ttl=300)
@@ -646,6 +785,22 @@ for m in data["members"]:
     m["fees"] = dynamic_totals.get(name, {}).get("fees", 0.0)
     m["total_contributed"] = dynamic_totals.get(name, {}).get("contributed", m.get("total_contributed", 0.0))
 save_members(data["members"])
+
+# ====================== MARKET STATUS (for price strategy + UI badges) ======================
+try:
+    _market_open = is_us_market_open()
+    st.session_state.market_is_open = _market_open
+    et = pytz.timezone("US/Eastern")
+    now_et = datetime.now(et)
+    if _market_open:
+        st.session_state.market_status = "🟢 US Market Open — showing most recent / intraday prices"
+    elif now_et.weekday() >= 5:
+        st.session_state.market_status = "🔴 Market Closed (Weekend) — using final daily EOD closes"
+    else:
+        st.session_state.market_status = "🔴 Market Closed (After Hours) — using final daily EOD closes"
+except Exception:
+    st.session_state.market_is_open = False
+    st.session_state.market_status = "🔴 Market status unavailable — using best available prices"
 
 # ====================== PORTFOLIO SUMMARY CALCULATIONS (safe version) ======================
 _refresh_token = st.session_state.get("price_refresh_token")
@@ -874,8 +1029,15 @@ with tab1:
 # TAB 2: Club Holdings with Live Prices + Historical Chart
 with tab2:
     st.subheader("Club Holdings with Live Prices")
-    
-    # ====================== FORCE PRICE REFRESH (AGGRESSIVE LIVE YFINANCE) ======================
+
+    # Market status badge (driven by ET hours + the smart get_price logic)
+    status = st.session_state.get("market_status", "Prices loaded")
+    if st.session_state.get("market_is_open"):
+        st.success(status)
+    else:
+        st.info(status)
+
+    # ====================== FORCE PRICE REFRESH (kept as requested) ======================
     col_refresh1, col_refresh2 = st.columns([1, 3])
     with col_refresh1:
         if st.button("🔄 Force Refresh Live Prices (from yfinance)", type="primary", use_container_width=True, 
@@ -935,7 +1097,7 @@ with tab2:
     st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
     if total_market == 0:
-        st.warning("⚠️ Prices showing $0.00. This usually means we have no yfinance data and no prior cached price for these tickers. Try Force Refresh. After hours it will use the last known yfinance close.")
+        st.warning("⚠️ Prices showing $0.00. This usually means we have no yfinance data and no prior cached price for these tickers. Try Force Refresh. After hours / closed market we intentionally use the final daily (EOD) close.")
 
     # ====================== PORTFOLIO PERFORMANCE HISTORY (REAL DATA) ======================
     st.subheader("📈 Portfolio Performance History")
@@ -953,19 +1115,29 @@ with tab2:
     cumulative_invested = sum(dynamic_totals.get(m["name"], {}).get("invested", 0.0) for m in data.get("members", []))
     current_return_on_invested = (current_securities_value / cumulative_invested) if cumulative_invested > 0 else 1.0
 
-    # --- Manual Snapshot Button ---
+    # --- AUTO daily snapshot (keeps the manual button below) ---
+    # This runs on load / after price refresh. It records the final daily NAV for the most recent
+    # completed trading day (using EOD prices after hours) if that date is missing.
+    # You no longer have to remember to press the button every day.
+    auto_record_eod_snapshot_if_needed(
+        current_portfolio_nav, current_securities_value, current_cash_balance,
+        cumulative_invested, current_return_on_invested
+    )
+
+    # --- Manual Snapshot Button (kept exactly as requested) ---
     col_btn1, col_btn2 = st.columns([2, 3])
     with col_btn1:
         if st.button("📅 Record Today's Portfolio Snapshot", type="primary", use_container_width=True):
-            today_str = datetime.now().strftime("%Y-%m-%d")
+            # Use the smart trading-day date (so pressing on weekend / Monday correctly attributes to Friday etc.)
+            snap_date = get_last_trading_day_str()
 
-            # Check if today's snapshot already exists
+            # Check if this trading day's snapshot already exists
             existing_dates = [entry.get("date") for entry in portfolio_history]
-            if today_str in existing_dates:
-                st.warning(f"Snapshot for {today_str} already exists. No duplicate recorded.")
+            if snap_date in existing_dates:
+                st.warning(f"Snapshot for {snap_date} already exists. No duplicate recorded.")
             else:
                 new_snapshot = {
-                    "date": today_str,
+                    "date": snap_date,
                     "portfolio_nav": round(current_portfolio_nav, 2),
                     "securities_value": round(current_securities_value, 2),
                     "cash_balance": round(current_cash_balance, 2),
@@ -976,7 +1148,7 @@ with tab2:
                 # Sort by date just in case
                 portfolio_history = sorted(portfolio_history, key=lambda x: x["date"])
                 save_to_supabase("portfolio_history", portfolio_history)
-                st.success(f"✅ Snapshot for {today_str} recorded successfully!")
+                st.success(f"✅ Snapshot for {snap_date} recorded successfully!")
                 st.rerun()
 
     with col_btn2:
@@ -985,6 +1157,12 @@ with tab2:
             st.info(f"Last recorded snapshot: **{last_date}**")
         else:
             st.warning("No historical snapshots recorded yet. Press the button above to start tracking.")
+
+    # One-time message if the auto-recorder just saved a missing day for you
+    if st.session_state.get("just_auto_recorded_date"):
+        auto_d = st.session_state.pop("just_auto_recorded_date")
+        st.success(f"✅ Auto-recorded daily EOD snapshot for **{auto_d}** (final daily prices after close / weekend).")
+        # No rerun needed — just informational for this run
 
     # --- Build DataFrame for Charts ---
     if portfolio_history:
