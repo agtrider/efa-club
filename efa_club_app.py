@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 import os
 import pytz
+import requests
 
 # ====================== PAGE CONFIG ======================
 st.set_page_config(
@@ -250,6 +251,17 @@ def clear_price_cache(tickers=None):
         last_prices = {}
     save_last_prices(last_prices)
 
+def purge_invalid_price_cache():
+    """Remove poisoned cache entries (e.g. csv_fill purchase prices saved as market quotes)."""
+    last_prices = load_last_prices()
+    dirty = [k for k, v in last_prices.items() if str(v.get("source", "")).lower() == "csv_fill"]
+    if not dirty:
+        return
+    for k in dirty:
+        last_prices.pop(k, None)
+    save_last_prices(last_prices)
+    print(f"[price cache] purged invalid csv_fill entries: {dirty}")
+
 def _yf_history(stock, **kwargs):
     """yfinance 1.x removed progress= — strip it so history calls don't fail silently on Render."""
     kwargs.pop("progress", None)
@@ -258,6 +270,82 @@ def _yf_history(stock, **kwargs):
 def _yf_download(ticker, **kwargs):
     kwargs.pop("progress", None)
     return yf.download(ticker, **kwargs)
+
+def _extract_close_series(df):
+    """Normalize yf.download output to a single Close series."""
+    if df is None or df.empty:
+        return pd.Series(dtype=float)
+    if isinstance(df.columns, pd.MultiIndex):
+        close_col = df["Close"]
+        if isinstance(close_col, pd.DataFrame):
+            return close_col.iloc[:, 0]
+        return close_col
+    return df["Close"]
+
+def fetch_finnhub_quote(tkr):
+    """Finnhub real-time quote — primary live price and EOD fallback on cloud."""
+    if FINNHUB_CLIENT is None:
+        return 0.0, ""
+    try:
+        q = FINNHUB_CLIENT.quote(tkr)
+        c = q.get("c") if q else None
+        if c and float(c) > 0:
+            return float(c), " (finnhub quote)"
+    except Exception as e:
+        print(f"[finnhub quote] {tkr}: {e}")
+    return 0.0, ""
+
+
+def fetch_yahoo_chart(tkr, target_date_str=None, live=False):
+    """
+    Direct Yahoo chart API — works on Render when yfinance scraping fails.
+    Never returns transaction fills; only exchange-reported market data.
+    """
+    try:
+        params = {"interval": "1m", "range": "1d"} if live else {"interval": "1d", "range": "1mo"}
+        r = requests.get(
+            f"https://query1.finance.yahoo.com/v8/finance/chart/{tkr}",
+            params=params,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; EFAClub/1.0)"},
+            timeout=12,
+        )
+        if r.status_code != 200:
+            return 0.0, ""
+        results = (r.json().get("chart") or {}).get("result") or []
+        if not results:
+            return 0.0, ""
+        res = results[0]
+        meta = res.get("meta") or {}
+        et = pytz.timezone("US/Eastern")
+
+        if live:
+            rmp = meta.get("regularMarketPrice")
+            if rmp and float(rmp) > 0:
+                return float(rmp), " (yahoo chart live)"
+            timestamps = res.get("timestamp") or []
+            closes = (res.get("indicators") or {}).get("quote", [{}])[0].get("close") or []
+            for c in reversed(closes):
+                if c is not None and float(c) > 0:
+                    return float(c), " (yahoo chart intraday)"
+            return 0.0, ""
+
+        if target_date_str:
+            timestamps = res.get("timestamp") or []
+            closes = (res.get("indicators") or {}).get("quote", [{}])[0].get("close") or []
+            for ts, c in zip(reversed(timestamps), reversed(closes)):
+                if c is None or float(c) <= 0:
+                    continue
+                day_str = datetime.fromtimestamp(ts, et).strftime("%Y-%m-%d")
+                if day_str == target_date_str:
+                    return float(c), f" (yahoo chart / EOD {target_date_str})"
+
+        rmp = meta.get("regularMarketPrice")
+        if rmp and float(rmp) > 0:
+            label = f" (yahoo chart regularMarketPrice / EOD {target_date_str})" if target_date_str else " (yahoo chart)"
+            return float(rmp), label
+    except Exception as e:
+        print(f"[yahoo chart] {tkr}: {e}")
+    return 0.0, ""
 
 # ====================== FORCE FRESH LOAD (Now Safe) ======================
 if "watchlist" not in st.session_state:
@@ -488,16 +576,12 @@ def get_price(ticker, _refresh_token=None):
 
         if is_open:
             # --- LIVE (regular session): most recent intraday price ---
-            if FINNHUB_CLIENT is not None:
-                try:
-                    q = FINNHUB_CLIENT.quote(tkr)
-                    if q:
-                        c = q.get("c")
-                        if c and float(c) > 0:
-                            final_price = float(c)
-                            source_note = " (finnhub live)"
-                except Exception:
-                    pass
+            final_price, source_note = fetch_finnhub_quote(tkr)
+            if final_price > 0:
+                source_note = source_note.replace("quote", "live")
+
+            if final_price == 0:
+                final_price, source_note = fetch_yahoo_chart(tkr, live=True)
 
             if final_price == 0:
                 p = fi.get("last_price") or fi.get("regularMarketPrice")
@@ -541,22 +625,17 @@ def get_price(ticker, _refresh_token=None):
         cached_as_of = cached.get("as_of", "")
         if cached_price > 0:
             cached_src = str(cached.get("source", "")).lower()
-            cache_ok = is_open or (cached_as_of and cached_as_of >= target_eod and cached_src == "eod_close")
+            # Never serve csv_fill / transaction prices as market quotes
+            if cached_src in ("csv_fill", ""):
+                cached_src = ""
+            cache_ok = cached_src in ("intraday", "eod_close") and (
+                is_open or (cached_as_of and cached_as_of >= target_eod)
+            )
             if cache_ok:
                 return cached_price
 
-        # --- 7. Absolute last resort (brand new tickers) ---
-        last_trade = get_last_trade_price(tkr)
-        if last_trade > 0:
-            last_prices[tkr] = {
-                "price": last_trade,
-                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M") + " (CSV fill - no yfinance data yet)",
-                "source": "csv_fill",
-                "as_of": datetime.now().strftime("%Y-%m-%d")
-            }
-            save_last_prices(last_prices)
-            return last_trade
-
+        # All market data sources failed — return 0 (never use purchase fill as live price)
+        print(f"[get_price] {tkr}: all sources failed; refusing to use transaction fill as market price")
         return 0.0
 
     except Exception as e:
@@ -565,13 +644,13 @@ def get_price(ticker, _refresh_token=None):
         cached = last_prices.get(tkr, {})
         cached_price = cached.get("price", 0.0)
         cached_as_of = cached.get("as_of", "")
+        cached_src = str(cached.get("source", "")).lower()
         target_eod = get_last_trading_day_str()
         is_open = is_us_market_open()
-        if cached_price > 0:
-            cached_src = str(cached.get("source", "")).lower()
-            if is_open or (cached_as_of and cached_as_of >= target_eod and cached_src == "eod_close"):
+        if cached_price > 0 and cached_src in ("intraday", "eod_close"):
+            if is_open or (cached_as_of and cached_as_of >= target_eod):
                 return cached_price
-        return get_last_trade_price(tkr)
+        return 0.0
 
 
 # ====================== MARKET HOURS + AUTO SNAPSHOT HELPERS ======================
@@ -682,7 +761,12 @@ def fetch_eod_close(stock, tkr, target_date_str):
     if price > 0:
         return price, note
 
-    # 2. yfinance daily history pinned to the target trading day
+    # 2. Yahoo chart API (direct HTTP — reliable when yfinance fails on Render)
+    price, note = fetch_yahoo_chart(tkr, target_date_str=target_date_str, live=False)
+    if price > 0:
+        return price, note
+
+    # 3. yfinance daily history pinned to the target trading day
     try:
         end_dt = datetime.strptime(target_date_str, "%Y-%m-%d") + timedelta(days=1)
         hist = _yf_history(
@@ -708,15 +792,10 @@ def fetch_eod_close(stock, tkr, target_date_str):
 
     try:
         df = _yf_download(tkr, period="10d", auto_adjust=True)
-        if not df.empty:
-            if isinstance(df.columns, pd.MultiIndex):
-                close_col = df["Close"]
-                if isinstance(close_col, pd.DataFrame):
-                    close_col = close_col.iloc[:, 0]
-            else:
-                close_col = df["Close"]
+        close_col = _extract_close_series(df)
+        if not close_col.empty:
             price = _history_close_on_date(
-                pd.DataFrame({"Close": close_col}, index=df.index),
+                pd.DataFrame({"Close": close_col}, index=close_col.index),
                 target_date_str,
             )
             if price > 0:
@@ -724,7 +803,12 @@ def fetch_eod_close(stock, tkr, target_date_str):
     except Exception:
         pass
 
-    # 3. fast_info regularMarketPrice (when yfinance metadata is available)
+    # 4. Finnhub quote (last traded / session price)
+    price, note = fetch_finnhub_quote(tkr)
+    if price > 0:
+        return price, note + f" / EOD {target_date_str}"
+
+    # 5. fast_info regularMarketPrice (when yfinance metadata is available)
     if target_date_str == get_last_trading_day_str():
         try:
             fi = getattr(stock, "fast_info", {}) or {}
@@ -735,7 +819,7 @@ def fetch_eod_close(stock, tkr, target_date_str):
         except Exception:
             pass
 
-    # 4. Pre-market only: previous_close matches the prior completed session
+    # 6. Pre-market only: previous_close matches the prior completed session
     if is_us_premarket():
         try:
             fi = getattr(stock, "fast_info", {}) or {}
@@ -797,12 +881,13 @@ def auto_record_eod_snapshot_if_needed(current_portfolio_nav, current_securities
 
 # ====================== TECHNICAL INDICATORS FOR TAB 6 ======================
 @st.cache_data(ttl=300)
-def get_technical_indicators(ticker):
+def get_technical_indicators(ticker, _refresh_token=None):
     try:
         df = _yf_download(ticker, period="1y", interval="1d")
-        if df.empty:
+        close = _extract_close_series(df)
+        if close.empty:
             return None
-        df = df.dropna()
+        df = pd.DataFrame({"Close": close}).dropna()
         delta = df['Close'].diff()
         gain = delta.where(delta > 0, 0).rolling(14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
@@ -814,8 +899,9 @@ def get_technical_indicators(ticker):
         bb_std = df['Close'].rolling(20).std().iloc[-1] if len(df) > 20 else None
         bb_upper = bb_mid + 2 * bb_std if bb_mid is not None and bb_std is not None else None
         bb_lower = bb_mid - 2 * bb_std if bb_mid is not None and bb_std is not None else None
+        market_price = get_price(ticker, _refresh_token=_refresh_token)
         return {
-            "price": float(df['Close'].iloc[-1]) if not df['Close'].empty else 0.0,
+            "price": market_price if market_price > 0 else float(df['Close'].iloc[-1]),
             "rsi": float(rsi.iloc[-1]) if len(rsi) > 0 and not pd.isna(rsi.iloc[-1]) else None,
             "sma50": float(sma50) if sma50 is not None and not pd.isna(sma50) else None,
             "sma200": float(sma200) if sma200 is not None and not pd.isna(sma200) else None,
@@ -825,6 +911,39 @@ def get_technical_indicators(ticker):
         }
     except Exception:
         return None
+
+@st.cache_data(ttl=300)
+def get_fundamentals(ticker, _refresh_token=None):
+    """Tab 6 fundamentals — Current Price always from unified get_price (same as Tab 2)."""
+    try:
+        stock = yf.Ticker(ticker)
+        info = stock.info
+        price, price_source = get_price_with_source(ticker)
+        analysts = info.get("numberOfAnalystOpinions") or 0
+        return {
+            "Ticker": ticker,
+            "Company": info.get("longName", ticker),
+            "Industry": info.get("industry", "N/A"),
+            "Current Price": f"${price:.2f}" if price else "N/A",
+            "Price Source": price_source if price else "unavailable — click Force Refresh on Tab 2",
+            "Market Cap": f"${info.get('marketCap',0)/1e9:.2f}B" if info.get('marketCap') else "N/A",
+            "50d SMA": f"${info.get('fiftyDayAverage',0):.2f}" if info.get('fiftyDayAverage') else "N/A",
+            "200d SMA": f"${info.get('twoHundredDayAverage',0):.2f}" if info.get('twoHundredDayAverage') else "N/A",
+            "Forward P/E": info.get("forwardPE", "N/A"),
+            "Analyst Target": f"${info.get('targetMeanPrice',0):.2f}" if info.get('targetMeanPrice') else "N/A",
+            "Analysts": int(analysts),
+            "3MMT EBIT": f"${info.get('ebitda',0)/1e9:.2f}B" if info.get('ebitda') else "N/A",
+            "12MMT EPS": info.get("trailingEps", "N/A"),
+            "Forward EPS": info.get("forwardEps", "N/A"),
+            "Cash (B)": f"${info.get('totalCash',0)/1e9:.2f}B" if info.get('totalCash') else "N/A",
+            "FCF (B)": f"${info.get('freeCashflow',0)/1e9:.2f}B" if info.get('freeCashflow') else "N/A",
+        }
+    except Exception:
+        return {k: "N/A" for k in [
+            "Ticker", "Company", "Industry", "Current Price", "Price Source",
+            "Market Cap", "50d SMA", "200d SMA", "Forward P/E", "Analyst Target",
+            "Analysts", "3MMT EBIT", "12MMT EPS", "Forward EPS", "Cash (B)", "FCF (B)",
+        ]}
 
 # ====================== INITIAL LOAD ======================
 members = load_members()
@@ -839,11 +958,11 @@ if "watchlist" not in st.session_state:
 st.success("✅ Data loaded from Supabase. Upload Seed Deposit.csv first (12/31/2025), then your main transactions CSV using Append.")
 
 post_deploy_comment_once(
-    "deploy_2026-06-11_tab2_price_fix_v2",
-    "🚀 **Deploy 2026-06-11 v2 — Tab 2 price fix (Render)** "
-    "Root cause: yfinance `progress=` broke all history calls on Render → fell back to stale Supabase cache / yesterday's `previous_close`. "
-    "Fix: Finnhub daily candles + safe yfinance wrappers, no bad EOD fallbacks, Force Refresh clears Supabase cache. "
-    "**Action:** redeploy Render, then click **Force Refresh Live Prices** once."
+    "deploy_2026-06-11_tab2_price_fix_v3",
+    "🚀 **Deploy 2026-06-11 v3 — unified market prices (all tickers)** "
+    "FSLR $199 was your **purchase fill**, not market price ($271). When APIs failed on Render, app used transaction prices. "
+    "Fix: Yahoo chart API + Finnhub fallbacks, Tab 6 now uses same `get_price` as Tab 2, never uses fill as market quote, purges bad cache. "
+    "**Action:** redeploy Render → Tab 2 **Force Refresh Live Prices** once."
 )
 
 # ====================== AUTO-ALLOCATION ======================
@@ -939,6 +1058,13 @@ if "portfolio_holdings" not in st.session_state or st.session_state.get("portfol
     st.session_state.portfolio_holdings = list(holdings.keys())
     st.session_state.portfolio_quantities = {ticker: h["qty"] for ticker, h in holdings.items()}
 
+def get_all_tracked_tickers():
+    """Portfolio holdings + watchlist — every ticker that needs a market price."""
+    port = [str(t).upper().strip() for t in holdings.keys()]
+    wl = st.session_state.get("watchlist", []) or []
+    combined = port + [str(t).upper().strip() for t in wl]
+    return list(dict.fromkeys(t for t in combined if t and t not in ("CASH", "-")))
+
 # ====================== DYNAMIC TOTALS ======================
 def calculate_dynamic_totals():
     df_txn = pd.DataFrame(data["transactions"])
@@ -995,8 +1121,10 @@ except Exception:
     st.session_state.market_status = "🔴 Market status unavailable — using best available prices"
 
 # ====================== PORTFOLIO SUMMARY CALCULATIONS (safe version) ======================
+purge_invalid_price_cache()
 _refresh_token = st.session_state.get("price_refresh_token")
-prices = {ticker: get_price(ticker, _refresh_token=_refresh_token) for ticker in holdings}
+_tracked_tickers = get_all_tracked_tickers()
+prices = {ticker: get_price(ticker, _refresh_token=_refresh_token) for ticker in _tracked_tickers}
 total_market_value = sum(h["qty"] * prices.get(t, 0.0) for t, h in holdings.items())
 total_cost_basis = sum(h["cost_basis"] for h in holdings.values())
 overall_return = ((total_market_value / total_cost_basis) - 1) * 100 if total_cost_basis > 0 else 0.0
@@ -1241,7 +1369,11 @@ with tab2:
                 get_price.clear()
             except Exception:
                 pass
-            clear_price_cache(list(holdings.keys()))
+            clear_price_cache(get_all_tracked_tickers())
+            try:
+                get_fundamentals.clear()
+            except Exception:
+                pass
             st.success("Cache cleared (Streamlit + Supabase) — fetching fresh prices...")
             st.rerun()
     # === Holdings Table with price source diagnostics ===
@@ -1643,6 +1775,7 @@ with tab6:
         "Company": st.column_config.TextColumn("Company", width=200),
         "Industry": st.column_config.TextColumn("Industry", width=160),
         "Current Price": st.column_config.TextColumn("Current Price", width=95),
+        "Price Source": st.column_config.TextColumn("Price Source", width=180),
         "Market Cap": st.column_config.TextColumn("Market Cap", width=90),
         "50d SMA": st.column_config.TextColumn("50d SMA", width=85),
         "200d SMA": st.column_config.TextColumn("200d SMA", width=85),
@@ -1656,43 +1789,17 @@ with tab6:
         "FCF (B)": st.column_config.TextColumn("FCF (B)", width=85),
     }
 
-    # ====================== YFINANCE FUNDAMENTALS ======================
-    @st.cache_data(ttl=300)
-    def get_fundamentals(ticker):
-        try:
-            stock = yf.Ticker(ticker)
-            info = stock.info
-            price = info.get("currentPrice") or info.get("regularMarketPreviousClose") or 0
-            analysts = info.get("numberOfAnalystOpinions") or 0
-            return {
-                "Ticker": ticker,
-                "Company": info.get("longName", ticker),
-                "Industry": info.get("industry", "N/A"),
-                "Current Price": f"${price:.2f}" if price else "N/A",
-                "Market Cap": f"${info.get('marketCap',0)/1e9:.2f}B" if info.get('marketCap') else "N/A",
-                "50d SMA": f"${info.get('fiftyDayAverage',0):.2f}" if info.get('fiftyDayAverage') else "N/A",
-                "200d SMA": f"${info.get('twoHundredDayAverage',0):.2f}" if info.get('twoHundredDayAverage') else "N/A",
-                "Forward P/E": info.get("forwardPE", "N/A"),
-                "Analyst Target": f"${info.get('targetMeanPrice',0):.2f}" if info.get('targetMeanPrice') else "N/A",
-                "Analysts": int(analysts),
-                "3MMT EBIT": f"${info.get('ebitda',0)/1e9:.2f}B" if info.get('ebitda') else "N/A",
-                "12MMT EPS": info.get("trailingEps", "N/A"),
-                "Forward EPS": info.get("forwardEps", "N/A"),
-                "Cash (B)": f"${info.get('totalCash',0)/1e9:.2f}B" if info.get('totalCash') else "N/A",
-                "FCF (B)": f"${info.get('freeCashflow',0)/1e9:.2f}B" if info.get('freeCashflow') else "N/A",
-            }
-        except:
-            return {k: "N/A" for k in ["Ticker","Company","Industry","Current Price","Market Cap","50d SMA","200d SMA","Forward P/E","Analyst Target","Analysts","3MMT EBIT","12MMT EPS","Forward EPS","Cash (B)","FCF (B)"]}
-
     # ====================== FUNDAMENTALS TABLES ======================
     if all_tickers:
         st.markdown("### 📊 Fundamentals & Technicals (from yfinance)")
         if portfolio_tickers:
             st.markdown("#### Portfolio Holdings")
-            st.dataframe(pd.DataFrame([get_fundamentals(t) for t in portfolio_tickers]), column_config=fundamentals_column_config, width="stretch", hide_index=True)
+            _ftoken = st.session_state.get("price_refresh_token")
+            st.dataframe(pd.DataFrame([get_fundamentals(t, _refresh_token=_ftoken) for t in portfolio_tickers]), column_config=fundamentals_column_config, width="stretch", hide_index=True)
         if watchlist_tickers:
             st.markdown("#### Watchlist")
-            st.dataframe(pd.DataFrame([get_fundamentals(t) for t in watchlist_tickers]), column_config=fundamentals_column_config, width="stretch", hide_index=True)
+            _ftoken = st.session_state.get("price_refresh_token")
+            st.dataframe(pd.DataFrame([get_fundamentals(t, _refresh_token=_ftoken) for t in watchlist_tickers]), column_config=fundamentals_column_config, width="stretch", hide_index=True)
 
     # ====================== GROK ANALYSIS ======================
     st.markdown("### 🔍 Grok Qualitative Analysis Summary")
