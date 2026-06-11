@@ -102,6 +102,24 @@ def load_comments():
 def save_comments(comments_list):
     save_to_supabase("comments", comments_list)
 
+def post_deploy_comment_once(marker, text):
+    """Post a one-time deployment notice to the Comments tab (Supabase)."""
+    if supabase is None:
+        return
+    try:
+        comments = load_comments() or []
+        if any(marker in str(c.get("text", "")) for c in comments):
+            return
+        comments.insert(0, {
+            "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "author": "System",
+            "text": text,
+            "resolved": False
+        })
+        save_comments(comments)
+    except Exception as e:
+        print(f"[deploy comment] Error: {e}")
+
 def load_watchlist():
     return load_from_supabase("watchlist", [])
 
@@ -368,7 +386,9 @@ def get_price_with_source(ticker):
     if src == "eod_close" or "eod" in src:
         label = "Final Daily Close (EOD)"
         if as_of:
-            label += f" {as_of}"
+            label += f" — as of {as_of}"
+        else:
+            label += f" — as of {get_last_trading_day_str()}"
         return price, label
     if src == "intraday":
         label = "Live / Most Recent (Intraday)"
@@ -445,41 +465,28 @@ def get_price(ticker, _refresh_token=None):
         final_price = 0.0
         source_note = ""
         is_open = is_us_market_open()
+        target_eod = get_last_trading_day_str()
 
-        # --- 1. Prefer reliable quote source first (Finnhub if available - proper API, far more stable on Render/cloud than yf scraping per 2025 GitHub reports & rate limit issues) ---
-        if FINNHUB_CLIENT is not None:
-            try:
-                q = FINNHUB_CLIENT.quote(tkr)
-                if q:
-                    if is_open:
+        if is_open:
+            # --- LIVE (regular session): most recent intraday price ---
+            if FINNHUB_CLIENT is not None:
+                try:
+                    q = FINNHUB_CLIENT.quote(tkr)
+                    if q:
                         c = q.get("c")
                         if c and float(c) > 0:
                             final_price = float(c)
                             source_note = " (finnhub live)"
-                    else:
-                        pc = q.get("pc")
-                        if pc and float(pc) > 0:
-                            final_price = float(pc)
-                            source_note = " (finnhub previous close / EOD)"
-            except Exception:
-                pass
+                except Exception:
+                    pass
 
-        # --- 2. Fast path via fast_info (widely recommended on GitHub/SO 2025 for last_price + previous_close when full .info is empty/rate-limited) ---
-        if final_price == 0:
-            if is_open:
+            if final_price == 0:
                 p = fi.get("last_price") or fi.get("regularMarketPrice")
                 if p and float(p) > 0:
                     final_price = float(p)
                     source_note = " (yfinance fast_info last_price)"
-            else:
-                p = fi.get("previous_close") or fi.get("regularMarketPreviousClose")
-                if p and float(p) > 0:
-                    final_price = float(p)
-                    source_note = " (yfinance fast_info previous_close / EOD)"
 
-        # --- 3. Market-aware yfinance history (1m for live during hours; daily/prev for final EOD) ---
-        if final_price == 0:
-            if is_open:
+            if final_price == 0:
                 try:
                     hist = stock.history(period="1d", interval="1m", progress=False, prepost=False)
                     if not hist.empty:
@@ -489,69 +496,61 @@ def get_price(ticker, _refresh_token=None):
                             source_note = " (yfinance intraday 1m)"
                 except Exception:
                     pass
-            else:
+        else:
+            # --- EOD (after hours / pre-market / weekend): close for target trading day ---
+            # previous_close / Finnhub pc are one session behind — do NOT use them after today's close.
+            final_price, source_note = fetch_eod_close(stock, tkr, target_eod)
+
+            if final_price == 0:
                 for key in ["regularMarketPreviousClose", "previousClose"]:
                     val = info.get(key)
                     if val and float(val) > 0:
                         final_price = float(val)
-                        source_note = " (yfinance previous close / EOD)"
+                        source_note = f" (yfinance info {key} / EOD fallback)"
                         break
-                if final_price == 0:
-                    try:
-                        hist = stock.history(period="5d", interval="1d", progress=False)
-                        if not hist.empty:
-                            price = float(hist["Close"].iloc[-1])
-                            if price > 0:
-                                final_price = price
-                                source_note = " (yfinance daily close - EOD)"
-                    except Exception:
-                        pass
 
-        # --- 4. Broader fallbacks (common patterns from GitHub issues & 2025 tutorials) ---
-        if final_price == 0:
-            for period in ["5d", "1mo"]:
+            if final_price == 0:
                 try:
-                    hist = stock.history(period=period, progress=False)
-                    if not hist.empty:
-                        price = float(hist["Close"].iloc[-1])
+                    df = yf.download(tkr, period="10d", progress=False, auto_adjust=True)
+                    if not df.empty:
+                        if isinstance(df.columns, pd.MultiIndex):
+                            close_col = df["Close"]
+                            if isinstance(close_col, pd.DataFrame):
+                                close_col = close_col.iloc[:, 0]
+                        else:
+                            close_col = df["Close"]
+                        price = _history_close_on_date(
+                            pd.DataFrame({"Close": close_col}, index=df.index),
+                            target_eod,
+                        )
                         if price > 0:
                             final_price = price
-                            source_note = f" (yfinance {period} close)"
-                            break
+                            source_note = f" (yfinance download close {target_eod})"
                 except Exception:
-                    continue
+                    pass
 
-        if final_price == 0:
-            try:
-                df = yf.download(tkr, period="5d", progress=False, auto_adjust=True)
-                if not df.empty:
-                    price = float(df["Close"].iloc[-1])
-                    if price > 0:
-                        final_price = price
-                        source_note = " (yfinance download close)"
-            except Exception:
-                pass
-
-        # --- 5. Persist any successful fresh price (this overwrites the "last saved" in Supabase) ---
+        # --- Persist any successful fresh price (this overwrites the "last saved" in Supabase) ---
         if final_price > 0:
             last_prices = load_last_prices()
             src_type = "intraday" if is_open else "eod_close"
+            as_of = datetime.now().strftime("%Y-%m-%d") if is_open else target_eod
             last_prices[tkr] = {
                 "price": final_price,
                 "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M") + source_note,
                 "source": src_type,
-                "as_of": datetime.now().strftime("%Y-%m-%d")
+                "as_of": as_of
             }
             save_last_prices(last_prices)
             return final_price
 
-        # --- 6. All fresh attempts (Finnhub + fast_info + yf) failed this run → return the last successfully saved price from Supabase ---
-        # This is exactly why you're still seeing the old cached "last saved" price.
+        # --- All fresh attempts failed → return cached price only if still valid for this session ---
         last_prices = load_last_prices()
         cached = last_prices.get(tkr, {})
         cached_price = cached.get("price", 0.0)
+        cached_as_of = cached.get("as_of", "")
         if cached_price > 0:
-            return cached_price
+            if is_open or (cached_as_of and cached_as_of >= target_eod):
+                return cached_price
 
         # --- 7. Absolute last resort (brand new tickers) ---
         last_trade = get_last_trade_price(tkr)
@@ -614,6 +613,97 @@ def get_last_trading_day_str():
     except Exception:
         # Safe fallback to calendar day
         return datetime.now().strftime("%Y-%m-%d")
+
+
+def _history_close_on_date(hist, target_date_str):
+    """Return the Close for target_date_str from a yfinance daily history DataFrame, or 0.0."""
+    if hist is None or hist.empty:
+        return 0.0
+    try:
+        et = pytz.timezone("US/Eastern")
+        for idx in reversed(hist.index):
+            if hasattr(idx, "tz_convert"):
+                day_str = idx.tz_convert(et).strftime("%Y-%m-%d")
+            elif hasattr(idx, "strftime"):
+                day_str = idx.strftime("%Y-%m-%d")
+            else:
+                continue
+            if day_str == target_date_str:
+                price = float(hist.loc[idx, "Close"])
+                return price if price > 0 else 0.0
+        # Fallback: last row is usually the most recent session when target is last trading day
+        price = float(hist["Close"].iloc[-1])
+        return price if price > 0 else 0.0
+    except Exception:
+        return 0.0
+
+
+def fetch_eod_close(stock, tkr, target_date_str):
+    """
+    Return (price, source_note) for the regular-session close on target_date_str.
+    After hours on 6/11 we want 6/11's close — NOT previous_close/pc (which is 6/10).
+    """
+    # 1. fast_info regularMarketPrice reflects the latest completed regular session
+    if target_date_str == get_last_trading_day_str():
+        try:
+            fi = getattr(stock, "fast_info", {}) or {}
+            for key in ("regularMarketPrice", "last_price"):
+                p = fi.get(key)
+                if p and float(p) > 0:
+                    return float(p), f" (yfinance fast_info {key} / EOD {target_date_str})"
+        except Exception:
+            pass
+
+    # 2. Daily history pinned to the target trading day (most reliable EOD source)
+    try:
+        end_dt = datetime.strptime(target_date_str, "%Y-%m-%d") + timedelta(days=1)
+        hist = stock.history(
+            start=target_date_str,
+            end=end_dt.strftime("%Y-%m-%d"),
+            interval="1d",
+            progress=False,
+            auto_adjust=True,
+        )
+        price = _history_close_on_date(hist, target_date_str)
+        if price > 0:
+            return price, f" (yfinance daily close {target_date_str})"
+    except Exception:
+        pass
+
+    try:
+        hist = stock.history(period="10d", interval="1d", progress=False, auto_adjust=True)
+        price = _history_close_on_date(hist, target_date_str)
+        if price > 0:
+            return price, f" (yfinance daily close {target_date_str})"
+    except Exception:
+        pass
+
+    # 3. Pre-market only: previous_close matches the prior completed session
+    try:
+        et = pytz.timezone("US/Eastern")
+        now_et = datetime.now(et)
+        is_premarket = now_et.weekday() < 5 and (now_et.hour < 9 or (now_et.hour == 9 and now_et.minute < 30))
+        if is_premarket:
+            fi = getattr(stock, "fast_info", {}) or {}
+            info = getattr(stock, "info", {}) or {}
+            for key in ("previous_close", "regularMarketPreviousClose"):
+                val = fi.get(key) or info.get(key)
+                if val and float(val) > 0:
+                    return float(val), f" (yfinance previous_close / EOD {target_date_str})"
+    except Exception:
+        pass
+
+    # 4. Finnhub: use current quote (c), not pc — pc is always one session behind
+    if FINNHUB_CLIENT is not None:
+        try:
+            q = FINNHUB_CLIENT.quote(tkr)
+            c = q.get("c") if q else None
+            if c and float(c) > 0:
+                return float(c), f" (finnhub quote / EOD {target_date_str})"
+        except Exception:
+            pass
+
+    return 0.0, ""
 
 
 def auto_record_eod_snapshot_if_needed(current_portfolio_nav, current_securities_value,
@@ -703,6 +793,13 @@ if "watchlist" not in st.session_state:
     st.session_state.watchlist = load_watchlist()
 
 st.success("✅ Data loaded from Supabase. Upload Seed Deposit.csv first (12/31/2025), then your main transactions CSV using Append.")
+
+post_deploy_comment_once(
+    "deploy_2026-06-11_tab2_price_fix",
+    "🚀 **Deploy 2026-06-11 — Tab 2 price fix** "
+    "After-hours / EOD prices now use **today's** regular-session close (not yesterday's `previous_close`). "
+    "Tab 2 badge shows the EOD date. **Action:** reboot Render if needed, then click **Force Refresh Live Prices** once."
+)
 
 # ====================== AUTO-ALLOCATION ======================
 def auto_allocate_transactions():
@@ -841,12 +938,13 @@ try:
     st.session_state.market_is_open = _market_open
     et = pytz.timezone("US/Eastern")
     now_et = datetime.now(et)
+    _eod_day = get_last_trading_day_str()
     if _market_open:
         st.session_state.market_status = "🟢 US Market Open — showing most recent / intraday prices"
     elif now_et.weekday() >= 5:
-        st.session_state.market_status = "🔴 Market Closed (Weekend) — using final daily EOD closes"
+        st.session_state.market_status = f"🔴 Market Closed (Weekend) — using EOD close for **{_eod_day}**"
     else:
-        st.session_state.market_status = "🔴 Market Closed (After Hours) — using final daily EOD closes"
+        st.session_state.market_status = f"🔴 Market Closed (After Hours) — using EOD close for **{_eod_day}**"
 except Exception:
     st.session_state.market_is_open = False
     st.session_state.market_status = "🔴 Market status unavailable — using best available prices"
