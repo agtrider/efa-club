@@ -283,7 +283,7 @@ def _extract_close_series(df):
     return df["Close"]
 
 def fetch_finnhub_quote(tkr):
-    """Finnhub real-time quote — primary live price and EOD fallback on cloud."""
+    """Finnhub real-time quote — optional API when FINNHUB_API_KEY is set."""
     if FINNHUB_CLIENT is None:
         return 0.0, ""
     try:
@@ -296,56 +296,201 @@ def fetch_finnhub_quote(tkr):
     return 0.0, ""
 
 
-def fetch_yahoo_chart(tkr, target_date_str=None, live=False):
+_YAHOO_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
+
+
+def _yahoo_chart_request(tkr, params):
+    """Hit Yahoo chart API (query1, then query2). More reliable than yfinance scraping on cloud hosts."""
+    for host in ("query1", "query2"):
+        try:
+            r = requests.get(
+                f"https://{host}.finance.yahoo.com/v8/finance/chart/{tkr}",
+                params=params,
+                headers={"User-Agent": _YAHOO_UA},
+                timeout=12,
+            )
+            if r.status_code == 200:
+                results = (r.json().get("chart") or {}).get("result") or []
+                if results:
+                    return results[0]
+        except Exception as e:
+            print(f"[yahoo chart] {tkr} via {host}: {e}")
+    return None
+
+
+def _chart_closes(res):
+    """Extract (timestamps, close prices) from a Yahoo chart result."""
+    timestamps = res.get("timestamp") or []
+    closes = (res.get("indicators") or {}).get("quote", [{}])[0].get("close") or []
+    return timestamps, closes
+
+
+def _meta_price(meta, *keys):
+    """Return first positive float found in chart meta for the given keys."""
+    for key in keys:
+        val = meta.get(key)
+        if val is not None:
+            try:
+                price = float(val)
+                if price > 0:
+                    return price
+            except (TypeError, ValueError):
+                pass
+    return 0.0
+
+
+def _close_on_date(timestamps, closes, target_date_str):
+    """Return the daily close for target_date_str from chart bars."""
+    if not timestamps or not closes:
+        return 0.0
+    et = pytz.timezone("US/Eastern")
+    for ts, c in zip(reversed(timestamps), reversed(closes)):
+        if c is None:
+            continue
+        try:
+            price = float(c)
+        except (TypeError, ValueError):
+            continue
+        if price <= 0:
+            continue
+        day_str = datetime.fromtimestamp(ts, et).strftime("%Y-%m-%d")
+        if day_str == target_date_str:
+            return price
+    return 0.0
+
+
+def _last_bar_close(timestamps, closes):
+    """Most recent non-null close in an intraday series."""
+    for c in reversed(closes or []):
+        if c is None:
+            continue
+        try:
+            price = float(c)
+        except (TypeError, ValueError):
+            continue
+        if price > 0:
+            return price
+    return 0.0
+
+
+def get_market_session():
     """
-    Direct Yahoo chart API — works on Render when yfinance scraping fails.
-    Never returns transaction fills; only exchange-reported market data.
+    US equity session for price selection:
+    - open: Mon-Fri 9:30-16:00 ET → latest intraday price
+    - premarket: weekday before 9:30 → prior session close
+    - afterhours: weekday after 16:00 → today's close
+    - weekend: Sat/Sun → last trading day close (Friday)
     """
     try:
-        params = {"interval": "1m", "range": "1d"} if live else {"interval": "1d", "range": "1mo"}
-        r = requests.get(
-            f"https://query1.finance.yahoo.com/v8/finance/chart/{tkr}",
-            params=params,
-            headers={"User-Agent": "Mozilla/5.0 (compatible; EFAClub/1.0)"},
-            timeout=12,
-        )
-        if r.status_code != 200:
-            return 0.0, ""
-        results = (r.json().get("chart") or {}).get("result") or []
-        if not results:
-            return 0.0, ""
-        res = results[0]
-        meta = res.get("meta") or {}
         et = pytz.timezone("US/Eastern")
+        now = datetime.now(et)
+        if now.weekday() >= 5:
+            return "weekend"
+        open_time = now.replace(hour=9, minute=30, second=0, microsecond=0)
+        close_time = now.replace(hour=16, minute=0, second=0, microsecond=0)
+        if now < open_time:
+            return "premarket"
+        if now < close_time:
+            return "open"
+        return "afterhours"
+    except Exception:
+        return "afterhours"
 
-        if live:
-            rmp = meta.get("regularMarketPrice")
-            if rmp and float(rmp) > 0:
-                return float(rmp), " (yahoo chart live)"
-            timestamps = res.get("timestamp") or []
-            closes = (res.get("indicators") or {}).get("quote", [{}])[0].get("close") or []
-            for c in reversed(closes):
-                if c is not None and float(c) > 0:
-                    return float(c), " (yahoo chart intraday)"
-            return 0.0, ""
 
-        if target_date_str:
-            timestamps = res.get("timestamp") or []
-            closes = (res.get("indicators") or {}).get("quote", [{}])[0].get("close") or []
-            for ts, c in zip(reversed(timestamps), reversed(closes)):
-                if c is None or float(c) <= 0:
-                    continue
-                day_str = datetime.fromtimestamp(ts, et).strftime("%Y-%m-%d")
-                if day_str == target_date_str:
-                    return float(c), f" (yahoo chart / EOD {target_date_str})"
+def fetch_yahoo_session_price(tkr, session=None, target_eod=None):
+    """
+    Session-aware price from Yahoo chart API (no yfinance dependency).
+    This is the primary path — works locally and on Render where yfinance often rate-limits.
+    """
+    session = session or get_market_session()
+    target_eod = target_eod or get_last_trading_day_str()
 
-        rmp = meta.get("regularMarketPrice")
-        if rmp and float(rmp) > 0:
-            label = f" (yahoo chart regularMarketPrice / EOD {target_date_str})" if target_date_str else " (yahoo chart)"
-            return float(rmp), label
-    except Exception as e:
-        print(f"[yahoo chart] {tkr}: {e}")
+    if session == "open":
+        res = _yahoo_chart_request(tkr, {"interval": "1m", "range": "1d"})
+        if res:
+            meta = res.get("meta") or {}
+            price = _meta_price(meta, "regularMarketPrice", "previousClose", "chartPreviousClose")
+            if price <= 0:
+                ts, closes = _chart_closes(res)
+                price = _last_bar_close(ts, closes)
+            if price > 0:
+                return price, " (yahoo chart live)"
+
+    # Closed sessions: daily bars pinned to the target trading day
+    res = _yahoo_chart_request(tkr, {"interval": "1d", "range": "1mo"})
+    if res:
+        meta = res.get("meta") or {}
+        ts, closes = _chart_closes(res)
+        price = _close_on_date(ts, closes, target_eod)
+
+        if price <= 0 and session == "afterhours":
+            price = _meta_price(meta, "regularMarketPrice")
+
+        if price <= 0 and session in ("premarket", "weekend"):
+            price = _meta_price(
+                meta,
+                "chartPreviousClose",
+                "previousClose",
+                "regularMarketPreviousClose",
+            )
+
+        if price <= 0:
+            price = _meta_price(meta, "regularMarketPrice")
+
+        if price <= 0 and closes:
+            price = _last_bar_close(ts, closes)
+
+        if price > 0:
+            label = {
+                "premarket": "prior close",
+                "afterhours": "today close",
+                "weekend": "last session close",
+            }.get(session, "EOD")
+            return price, f" (yahoo chart {label} / {target_eod})"
+
     return 0.0, ""
+
+
+def fetch_yahoo_chart(tkr, target_date_str=None, live=False):
+    """Backward-compatible wrapper around the session-aware Yahoo fetcher."""
+    if live:
+        return fetch_yahoo_session_price(tkr, session="open")
+    if target_date_str:
+        return fetch_yahoo_session_price(tkr, session="afterhours", target_eod=target_date_str)
+    return fetch_yahoo_session_price(tkr)
+
+
+def _fast_info_price(fi, *keys):
+    """Read a positive price from yfinance fast_info (camelCase keys in yfinance 1.x)."""
+    if not fi:
+        return 0.0
+    getter = getattr(fi, "get", None)
+    for key in keys:
+        val = getter(key) if getter else getattr(fi, key, None)
+        if val is not None:
+            try:
+                price = float(val)
+                if price > 0:
+                    return price
+            except (TypeError, ValueError):
+                pass
+    return 0.0
+
+
+def _cached_market_price(tkr, prefer_eod=None):
+    """Return last known good market price from Supabase/local cache (never csv_fill)."""
+    cached = load_last_prices().get(tkr, {})
+    price = float(cached.get("price", 0) or 0)
+    if price <= 0:
+        return 0.0, ""
+    src = str(cached.get("source", "")).lower()
+    if src == "csv_fill":
+        return 0.0, ""
+    note = cached.get("timestamp", "") or "cached"
+    return price, f" (cached: {note})"
 
 # ====================== FORCE FRESH LOAD (Now Safe) ======================
 if "watchlist" not in st.session_state:
@@ -506,6 +651,18 @@ def get_price_with_source(ticker):
     # Legacy timestamp string fallback (for old cached entries) + recognition of new sources
     if "CSV fill" in ts:
         return price, "CSV fill (first time - no yfinance data yet)"
+    elif "yahoo chart" in ts.lower():
+        if "live" in ts.lower():
+            label = "Live (Yahoo chart)"
+        elif "prior close" in ts.lower() or "premarket" in ts.lower():
+            label = "Prior Close (Yahoo chart)"
+        elif "today close" in ts.lower() or "afterhours" in ts.lower():
+            label = "Today's Close (Yahoo chart)"
+        else:
+            label = "EOD Close (Yahoo chart)"
+        if as_of:
+            label += f" — {as_of}"
+        return price, label
     elif "finnhub" in ts.lower():
         if "previous close" in ts.lower() or "EOD" in ts:
             label = "Final Daily Close (EOD, finnhub)"
@@ -540,71 +697,65 @@ def get_price_with_source(ticker):
         return price, "zero"
 
 
-# ====================== PRICE FETCHER - PERSISTENT LATEST YFINANCE PRICE ======================
+# ====================== PRICE FETCHER - SESSION-AWARE MARKET PRICE ======================
 @st.cache_data(ttl=180)
 def get_price(ticker, _refresh_token=None):
     """
-    Returns the best available price, preferring reliable sources first:
-    - Layered fetch (research from 2025 GitHub yfinance issues + common coder patterns):
-      1. Finnhub quote (if FINNHUB_API_KEY present) — proper API, much more reliable on Render/cloud than yf scraping.
-      2. yfinance fast_info (last_price / previous_close) — widely recommended on SO/GitHub when .info is empty.
-      3. Market-aware history: 1m intraday (open) or previous/daily close (closed).
-      4. Broader yf fallbacks (5d/1mo history, download).
-    - During market hours: most recent (live) price.
-    - After hours/closed: final daily (EOD) price.
-    - Any successful fresh price >0 is persisted to Supabase+local (overwrites old "last saved").
-    - If all fresh sources fail this run: falls back to last persisted good price (this is the "still showing last saved" behavior).
-    - Only uses transaction fill as absolute last resort for completely new tickers.
+    Always returns the best available market price:
+    - Before open (premarket): prior session close
+    - During regular hours: latest intraday price
+    - After close / weekend: that trading day's close
+    - If live fetch fails: last cached market price (never a purchase fill)
+
+    Primary source is Yahoo's chart API (direct HTTP). yfinance is backup only —
+    it rate-limits heavily on cloud hosts and fast_info keys changed in 1.x (lastPrice).
     """
     tkr = str(ticker).upper().strip()
     if not tkr or tkr in ("CASH", "-"):
         return 0.0
 
+    session = get_market_session()
+    is_open = session == "open"
+    target_eod = get_last_trading_day_str()
+    final_price = 0.0
+    source_note = ""
+
     try:
-        stock = yf.Ticker(tkr)
-        info = getattr(stock, "info", {}) or {}
-        fi = {}
-        try:
-            fi = getattr(stock, "fast_info", {}) or {}
-        except Exception:
-            fi = {}
+        # 1. Yahoo chart API — most reliable path (no yfinance scraping)
+        final_price, source_note = fetch_yahoo_session_price(tkr, session=session, target_eod=target_eod)
 
-        final_price = 0.0
-        source_note = ""
-        is_open = is_us_market_open()
-        target_eod = get_last_trading_day_str()
-
-        if is_open:
-            # --- LIVE (regular session): most recent intraday price ---
+        # 2. Finnhub (if API key configured)
+        if final_price == 0:
             final_price, source_note = fetch_finnhub_quote(tkr)
-            if final_price > 0:
+            if final_price > 0 and is_open:
                 source_note = source_note.replace("quote", "live")
 
-            if final_price == 0:
-                final_price, source_note = fetch_yahoo_chart(tkr, live=True)
+        # 3. yfinance fallbacks (only when Yahoo/Finnhub miss)
+        if final_price == 0:
+            stock = yf.Ticker(tkr)
+            fi = {}
+            try:
+                fi = getattr(stock, "fast_info", {}) or {}
+            except Exception:
+                fi = {}
 
-            if final_price == 0:
-                p = fi.get("last_price") or fi.get("regularMarketPrice")
-                if p and float(p) > 0:
-                    final_price = float(p)
-                    source_note = " (yfinance fast_info last_price)"
+            if is_open:
+                final_price = _fast_info_price(fi, "lastPrice", "regularMarketPrice", "last_price")
+                if final_price > 0:
+                    source_note = " (yfinance fast_info lastPrice)"
+                if final_price == 0:
+                    try:
+                        hist = _yf_history(stock, period="1d", interval="1m", prepost=False)
+                        if not hist.empty:
+                            price = float(hist["Close"].iloc[-1])
+                            if price > 0:
+                                final_price = price
+                                source_note = " (yfinance intraday 1m)"
+                    except Exception:
+                        pass
+            else:
+                final_price, source_note = fetch_eod_close(stock, tkr, target_eod)
 
-            if final_price == 0:
-                try:
-                    hist = _yf_history(stock, period="1d", interval="1m", prepost=False)
-                    if not hist.empty:
-                        price = float(hist["Close"].iloc[-1])
-                        if price > 0:
-                            final_price = price
-                            source_note = " (yfinance intraday 1m)"
-                except Exception:
-                    pass
-        else:
-            # --- EOD (after hours / pre-market / weekend): close for target trading day ---
-            # Never use previous_close after today's close — it is always one session behind.
-            final_price, source_note = fetch_eod_close(stock, tkr, target_eod)
-
-        # --- Persist any successful fresh price (this overwrites the "last saved" in Supabase) ---
         if final_price > 0:
             last_prices = load_last_prices()
             src_type = "intraday" if is_open else "eod_close"
@@ -613,72 +764,34 @@ def get_price(ticker, _refresh_token=None):
                 "price": final_price,
                 "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M") + source_note,
                 "source": src_type,
-                "as_of": as_of
+                "as_of": as_of,
             }
             save_last_prices(last_prices)
             return final_price
 
-        # --- All fresh attempts failed → return cached price only if still valid for this session ---
-        last_prices = load_last_prices()
-        cached = last_prices.get(tkr, {})
-        cached_price = cached.get("price", 0.0)
-        cached_as_of = cached.get("as_of", "")
+        cached_price, _ = _cached_market_price(tkr)
         if cached_price > 0:
-            cached_src = str(cached.get("source", "")).lower()
-            # Never serve csv_fill / transaction prices as market quotes
-            if cached_src in ("csv_fill", ""):
-                cached_src = ""
-            cache_ok = cached_src in ("intraday", "eod_close") and (
-                is_open or (cached_as_of and cached_as_of >= target_eod)
-            )
-            if cache_ok:
-                return cached_price
+            print(f"[get_price] {tkr}: live fetch failed, using cached ${cached_price:.2f}")
+            return cached_price
 
-        # All market data sources failed — return 0 (never use purchase fill as live price)
-        print(f"[get_price] {tkr}: all sources failed; refusing to use transaction fill as market price")
+        print(f"[get_price] {tkr}: all sources failed; no cached market price available")
         return 0.0
 
     except Exception as e:
         print(f"[get_price] {tkr} error: {e}")
-        last_prices = load_last_prices()
-        cached = last_prices.get(tkr, {})
-        cached_price = cached.get("price", 0.0)
-        cached_as_of = cached.get("as_of", "")
-        cached_src = str(cached.get("source", "")).lower()
-        target_eod = get_last_trading_day_str()
-        is_open = is_us_market_open()
-        if cached_price > 0 and cached_src in ("intraday", "eod_close"):
-            if is_open or (cached_as_of and cached_as_of >= target_eod):
-                return cached_price
-        return 0.0
+        cached_price, _ = _cached_market_price(tkr)
+        return cached_price if cached_price > 0 else 0.0
 
 
 # ====================== MARKET HOURS + AUTO SNAPSHOT HELPERS ======================
 def is_us_market_open():
     """Return True only during regular US equity trading hours (Mon-Fri 9:30-16:00 ET)."""
-    try:
-        et = pytz.timezone("US/Eastern")
-        now_et = datetime.now(et)
-        if now_et.weekday() >= 5:  # Saturday=5, Sunday=6
-            return False
-        open_time = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
-        close_time = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
-        return open_time <= now_et < close_time
-    except Exception:
-        return False
+    return get_market_session() == "open"
 
 
 def is_us_premarket():
     """Weekday before 9:30 ET — previous_close is the correct EOD reference."""
-    try:
-        et = pytz.timezone("US/Eastern")
-        now_et = datetime.now(et)
-        if now_et.weekday() >= 5:
-            return False
-        open_time = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
-        return now_et < open_time
-    except Exception:
-        return False
+    return get_market_session() == "premarket"
 
 
 def get_last_trading_day_str():
@@ -808,26 +921,25 @@ def fetch_eod_close(stock, tkr, target_date_str):
     if price > 0:
         return price, note + f" / EOD {target_date_str}"
 
-    # 5. fast_info regularMarketPrice (when yfinance metadata is available)
+    # 5. fast_info (yfinance 1.x uses camelCase: lastPrice, previousClose)
     if target_date_str == get_last_trading_day_str():
         try:
             fi = getattr(stock, "fast_info", {}) or {}
-            for key in ("regularMarketPrice", "last_price"):
-                p = fi.get(key)
-                if p and float(p) > 0:
-                    return float(p), f" (yfinance fast_info {key} / EOD {target_date_str})"
+            price = _fast_info_price(fi, "lastPrice", "regularMarketPrice", "last_price")
+            if price > 0:
+                return price, f" (yfinance fast_info lastPrice / EOD {target_date_str})"
         except Exception:
             pass
 
-    # 6. Pre-market only: previous_close matches the prior completed session
-    if is_us_premarket():
+    # 6. Pre-market / weekend: previousClose is the prior completed session
+    if get_market_session() in ("premarket", "weekend"):
         try:
             fi = getattr(stock, "fast_info", {}) or {}
-            info = getattr(stock, "info", {}) or {}
-            for key in ("previous_close", "regularMarketPreviousClose"):
-                val = fi.get(key) or info.get(key)
-                if val and float(val) > 0:
-                    return float(val), f" (yfinance previous_close / EOD {target_date_str})"
+            price = _fast_info_price(
+                fi, "previousClose", "regularMarketPreviousClose", "previous_close"
+            )
+            if price > 0:
+                return price, f" (yfinance previousClose / EOD {target_date_str})"
         except Exception:
             pass
 
@@ -1105,17 +1217,17 @@ save_members(data["members"])
 
 # ====================== MARKET STATUS (for price strategy + UI badges) ======================
 try:
-    _market_open = is_us_market_open()
-    st.session_state.market_is_open = _market_open
-    et = pytz.timezone("US/Eastern")
-    now_et = datetime.now(et)
+    _session = get_market_session()
+    st.session_state.market_is_open = _session == "open"
     _eod_day = get_last_trading_day_str()
-    if _market_open:
-        st.session_state.market_status = "🟢 US Market Open — showing most recent / intraday prices"
-    elif now_et.weekday() >= 5:
-        st.session_state.market_status = f"🔴 Market Closed (Weekend) — using EOD close for **{_eod_day}**"
+    if _session == "open":
+        st.session_state.market_status = "🟢 US Market Open — showing latest intraday prices"
+    elif _session == "premarket":
+        st.session_state.market_status = f"🟡 Pre-Market — showing prior close (**{_eod_day}**)"
+    elif _session == "weekend":
+        st.session_state.market_status = f"🔴 Market Closed (Weekend) — using close for **{_eod_day}**"
     else:
-        st.session_state.market_status = f"🔴 Market Closed (After Hours) — using EOD close for **{_eod_day}**"
+        st.session_state.market_status = f"🔴 After Hours — using today's close (**{_eod_day}**)"
 except Exception:
     st.session_state.market_is_open = False
     st.session_state.market_status = "🔴 Market status unavailable — using best available prices"
@@ -1360,8 +1472,8 @@ with tab2:
     # ====================== FORCE PRICE REFRESH (kept as requested) ======================
     col_refresh1, col_refresh2 = st.columns([1, 3])
     with col_refresh1:
-        if st.button("🔄 Force Refresh Live Prices (from yfinance)", type="primary", use_container_width=True, 
-                     help="Clears Streamlit + Supabase price cache and forces fresh API calls. Use after deploy or when prices look stale."):
+        if st.button("🔄 Force Refresh Live Prices", type="primary", use_container_width=True, 
+                     help="Clears Streamlit + Supabase price cache and forces fresh Yahoo/Finnhub API calls. Use after deploy or when prices look stale."):
             if "price_refresh_token" not in st.session_state:
                 st.session_state.price_refresh_token = 0
             st.session_state.price_refresh_token += 1
