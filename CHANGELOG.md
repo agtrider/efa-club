@@ -1,5 +1,13 @@
 # EFA Investment Club — Changelog
 
+## 2026-06-16 (f) — Data source validation (admin)
+
+**Added:** Sidebar Finnhub key status; Tab 6 **Admin → Validate data sources** probes Finnhub quote/fundamentals, Yahoo chart, yfinance, Supabase cache, history SMAs, and merged Tab 6 row for any ticker (default FSLR). **Clear fundamentals cache** button for stale partial entries.
+
+**Validate on Render:** Log in as admin → Tab 6 → expand validator → Run validation. Expect `finnhub_quote` + `finnhub_fundamentals` ✅ when `FINNHUB_API_KEY` is set.
+
+---
+
 ## 2026-06-16 (e) — Tab 6 fundamentals multi-source fix
 
 **Root cause:** On Render, yfinance `.info` often returns **only company name** (partial dict). Old code returned early on any `longName`, skipping industry/targets. Yahoo chart fallback (used for prices) has **no** industry, market cap, or analyst targets.

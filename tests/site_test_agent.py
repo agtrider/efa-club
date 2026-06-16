@@ -250,6 +250,30 @@ def test_yahoo_chart_fallback():
     return TestResult("yahoo_fallback").ok(f"FSLR={name} (source={source})")
 
 
+def test_validate_data_sources():
+    from efa_club_services import validate_data_sources
+
+    checks = validate_data_sources("FSLR")
+    if not checks:
+        return TestResult("validate_data_sources").fail("no checks returned")
+    names = {c.get("source") for c in checks}
+    required = {
+        "FINNHUB_API_KEY",
+        "yahoo_chart",
+        "merged_tab6_row",
+        "supabase_connection",
+    }
+    missing = required - names
+    if missing:
+        return TestResult("validate_data_sources").fail(f"missing probes: {missing}")
+    merged = next((c for c in checks if c["source"] == "merged_tab6_row"), None)
+    if not merged or merged["status"] == "fail":
+        return TestResult("validate_data_sources").fail(
+            f"merged_tab6_row={merged.get('status') if merged else 'missing'}: {merged.get('detail') if merged else ''}"
+        )
+    return TestResult("validate_data_sources").ok(f"{len(checks)} probes; merged={merged['status']}")
+
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
@@ -273,6 +297,7 @@ ALL_TESTS = [
     test_partial_yfinance_merge,
     test_fundamentals_all_portfolio_watchlist,
     test_yahoo_chart_fallback,
+    test_validate_data_sources,
     test_meeting_notes_permissions,
     test_orchestrator_cycle,
 ]

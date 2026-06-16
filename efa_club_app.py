@@ -67,6 +67,7 @@ from efa_club_services import (
     fundamentals_row_is_healthy,
     normalize_meeting_record,
     normalize_availability_responses,
+    validate_data_sources,
 )
 
 # ====================== PAGE CONFIG ======================
@@ -108,6 +109,11 @@ try:
         FINNHUB_CLIENT = finnhub.Client(api_key=_fh_key)
 except Exception:
     FINNHUB_CLIENT = None
+
+if FINNHUB_CLIENT is not None:
+    st.sidebar.success("✅ Finnhub API key configured")
+else:
+    st.sidebar.warning("⚠️ Finnhub API key not set (FINNHUB_API_KEY)")
 
 # ====================== STREAMLIT AUTH BRIDGE (logic in efa_club_auth) ======================
 def _query_param(name):
@@ -1875,6 +1881,37 @@ with tab6:
         )
         if FINNHUB_CLIENT is None:
             st.warning("FINNHUB_API_KEY not set — Tab 6 fundamentals may show N/A on cloud when yfinance rate-limits.")
+
+        if st.session_state.get("is_admin", False):
+            with st.expander("🔧 Admin: Validate data sources", expanded=False):
+                probe_ticker = st.text_input("Probe ticker", value="FSLR", key="tab6_probe_ticker").strip().upper() or "FSLR"
+                if st.button("Run validation", key="tab6_validate_sources"):
+                    with st.spinner(f"Probing {probe_ticker}…"):
+                        checks = validate_data_sources(probe_ticker, finnhub_client=FINNHUB_CLIENT)
+                    status_icon = {"ok": "✅", "warn": "⚠️", "fail": "❌", "skip": "⏭️"}
+                    rows = []
+                    for c in checks:
+                        fields = ", ".join(c.get("fields") or []) or "—"
+                        rows.append({
+                            "Source": c["source"],
+                            "Status": f"{status_icon.get(c['status'], '?')} {c['status']}",
+                            "Detail": c.get("detail", ""),
+                            "Fields": fields,
+                        })
+                    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+                    fails = [c for c in checks if c["status"] == "fail"]
+                    if fails:
+                        st.error(f"{len(fails)} source(s) failed — check Render env vars and API limits.")
+                    elif any(c["status"] == "warn" for c in checks):
+                        st.info("Some sources partial — merged row should still populate if Finnhub is healthy.")
+                    else:
+                        st.success("All probes passed for this ticker.")
+                if st.button("Clear fundamentals cache (all tickers)", key="tab6_clear_fund_cache"):
+                    save_to_supabase("fundamentals_cache", {})
+                    _cached_ticker_info.clear()
+                    st.success("Fundamentals cache cleared — next Tab 6 load will refetch.")
+                    st.rerun()
+
         if portfolio_tickers:
             st.markdown("#### Portfolio Holdings")
             _ftoken = st.session_state.get("price_refresh_token")

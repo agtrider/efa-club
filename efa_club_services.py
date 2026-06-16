@@ -339,6 +339,151 @@ def fundamentals_row_has_core_data(row):
     return any(row.get(c) not in (None, "", "N/A") for c in core_cols)
 
 
+def _probe_fields(data, fields):
+    """Return comma-separated field names that have non-empty values."""
+    found = []
+    for field in fields:
+        val = (data or {}).get(field)
+        if val not in (None, "", 0):
+            found.append(field)
+    return found
+
+
+def _check_row(source, ok, detail, fields=None):
+    return {
+        "source": source,
+        "status": "ok" if ok else "fail",
+        "detail": detail,
+        "fields": fields or [],
+    }
+
+
+def validate_data_sources(ticker="FSLR", finnhub_client=None):
+    """
+    Probe each fundamentals/price layer independently (admin diagnostics).
+    Returns list of {source, status, detail, fields} where status is ok|warn|fail|skip.
+    """
+    tkr = str(ticker).upper().strip() or "FSLR"
+    checks = []
+    fh_key = os.environ.get("FINNHUB_API_KEY", "")
+    client = _get_finnhub_client(finnhub_client)
+
+    if fh_key:
+        checks.append(_check_row("FINNHUB_API_KEY", True, f"set ({len(fh_key)} chars)", ["configured"]))
+    else:
+        checks.append(_check_row("FINNHUB_API_KEY", False, "not set — Tab 6/8 cloud fallbacks limited"))
+
+    if client is None:
+        checks.append({
+            "source": "finnhub_quote",
+            "status": "skip",
+            "detail": "no client",
+            "fields": [],
+        })
+        checks.append({
+            "source": "finnhub_fundamentals",
+            "status": "skip",
+            "detail": "no client",
+            "fields": [],
+        })
+    else:
+        try:
+            q = client.quote(tkr)
+            price = safe_float((q or {}).get("c"))
+            if price and price > 0:
+                checks.append(_check_row("finnhub_quote", True, f"${price:.2f}", ["c"]))
+            else:
+                checks.append(_check_row("finnhub_quote", False, "empty or zero quote"))
+        except Exception as e:
+            checks.append(_check_row("finnhub_quote", False, str(e)[:120]))
+
+        fh_info = _fetch_finnhub_info(tkr, client)
+        fh_fields = _probe_fields(
+            fh_info,
+            ("longName", "industry", "marketCap", "targetMeanPrice", "trailingEps", "forwardPE"),
+        )
+        if fh_fields:
+            checks.append(_check_row("finnhub_fundamentals", True, f"{len(fh_fields)} fields", fh_fields))
+        else:
+            checks.append(_check_row("finnhub_fundamentals", False, "no profile/metrics/target data"))
+
+    yf_info = _fetch_yfinance_info(tkr)
+    yf_fields = _probe_fields(
+        yf_info,
+        ("longName", "industry", "marketCap", "targetMeanPrice", "fiftyDayAverage", "forwardPE"),
+    )
+    if len(yf_fields) >= 2:
+        checks.append(_check_row("yfinance_info", True, f"{len(yf_fields)} fields", yf_fields))
+    elif yf_fields:
+        checks.append({
+            "source": "yfinance_info",
+            "status": "warn",
+            "detail": f"partial ({len(yf_fields)} fields) — common on Render",
+            "fields": yf_fields,
+        })
+    else:
+        checks.append(_check_row("yfinance_info", False, "no usable fields"))
+
+    chart = _fetch_yahoo_chart_meta(tkr)
+    chart_fields = _probe_fields(chart, ("longName", "regularMarketPrice"))
+    if chart_fields:
+        checks.append(_check_row("yahoo_chart", True, f"{len(chart_fields)} fields", chart_fields))
+    else:
+        checks.append(_check_row("yahoo_chart", False, "chart meta unavailable"))
+
+    cached = _load_cached_fundamentals(tkr)
+    cache_fields = _probe_fields(cached, _CORE_INFO_FIELDS)
+    if cache_fields:
+        checks.append(_check_row("supabase_fundamentals_cache", True, f"{len(cache_fields)} cached fields", cache_fields))
+    else:
+        checks.append({
+            "source": "supabase_fundamentals_cache",
+            "status": "warn",
+            "detail": "no fresh cache entry (will warm on first Tab 6 load)",
+            "fields": [],
+        })
+
+    hist = _compute_smas_from_history(tkr)
+    hist_fields = _probe_fields(hist, ("fiftyDayAverage", "twoHundredDayAverage"))
+    if hist_fields:
+        checks.append(_check_row("history_sma", True, f"{len(hist_fields)} SMAs", hist_fields))
+    else:
+        checks.append(_check_row("history_sma", False, "could not compute SMAs from history"))
+
+    merged = fetch_ticker_info(tkr, finnhub_client=client, use_cache=False)
+    merged_fields = _probe_fields(merged, _CORE_INFO_FIELDS)
+    row = build_fundamentals_row(tkr, merged, price=100.0, price_source="validation_probe")
+    core_ok = fundamentals_row_has_core_data(row)
+    merge_ok = len(merged_fields) >= 2 and core_ok
+    checks.append({
+        "source": "merged_tab6_row",
+        "status": "ok" if merge_ok else ("warn" if core_ok else "fail"),
+        "detail": (
+            f"completeness={_info_completeness(merged)} core_cols={'yes' if core_ok else 'no'}"
+            if merged_fields or core_ok
+            else "merge produced no core fundamentals"
+        ),
+        "fields": merged_fields,
+    })
+
+    try:
+        from efa_club_persistence import supabase
+        if supabase:
+            supabase.table("club_data").select("id").limit(1).execute()
+            checks.append(_check_row("supabase_connection", True, "club_data reachable"))
+        else:
+            checks.append({
+                "source": "supabase_connection",
+                "status": "warn",
+                "detail": "local only (no Supabase client)",
+                "fields": [],
+            })
+    except Exception as e:
+        checks.append(_check_row("supabase_connection", False, str(e)[:120]))
+
+    return checks
+
+
 def normalize_meeting_record(meeting):
     if not isinstance(meeting, dict):
         return meeting
