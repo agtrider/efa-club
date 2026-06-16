@@ -1,5 +1,27 @@
 # EFA Investment Club — Changelog
 
+## 2026-06-16 (c) — Tab 6 regression fix + site test agent
+
+**Files changed:** `efa_club_services.py` (new), `efa_club_app.py`, `tests/site_test_agent.py` (new)
+
+### Problem
+- Tab 6 portfolio/watchlist fundamentals showed **all N/A** after prior changes.
+- Root cause: `get_fundamentals()` used a broad `except` that returned a full N/A row on any error (bad `float()` on yfinance fields, or `get_price_with_source` failure), and cached that poisoned result for 5 minutes.
+
+### Solution
+- Extracted resilient helpers to `efa_club_services.py`: `fetch_ticker_info()` (yfinance + Yahoo chart fallback), `build_fundamentals_row()`, `safe_float()`.
+- `get_fundamentals()` no longer swallows errors into all-N/A; company name always falls back to ticker.
+- Added **`tests/site_test_agent.py`** — run before every deploy:
+  ```bash
+  python tests/site_test_agent.py
+  ```
+
+### Before next deploy (required)
+1. Run `python tests/site_test_agent.py` — must show **9/9 passed**.
+2. Deploy only if Tab 6 test passes for all portfolio + watchlist tickers.
+
+---
+
 ## 2026-06-16 (b) — Meeting notes v2, attachments, access tracker
 
 **Files changed:** `efa_club_app.py`

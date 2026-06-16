@@ -12,6 +12,14 @@ import requests
 import secrets
 import base64
 
+from efa_club_services import (
+    build_fundamentals_row,
+    can_edit_note,
+    fetch_ticker_info,
+    fundamentals_row_is_healthy,
+    normalize_meeting_record,
+)
+
 # ====================== PAGE CONFIG ======================
 st.set_page_config(
     page_title="EFA Investment Club",
@@ -324,36 +332,6 @@ def log_site_access(username, action="visit"):
         save_access_log(entries[:500])
     except Exception as e:
         print(f"[access_log] {e}")
-
-def normalize_meeting_record(meeting):
-    """Migrate legacy single 'notes' string to note_entries + attachment refs."""
-    if not isinstance(meeting, dict):
-        return meeting
-    meeting = dict(meeting)
-    if "note_entries" not in meeting:
-        meeting["note_entries"] = []
-        legacy_notes = meeting.get("notes", "")
-        if isinstance(legacy_notes, str) and legacy_notes.strip():
-            meeting["note_entries"].append({
-                "id": 1,
-                "author": "Legacy Import",
-                "text": legacy_notes.strip(),
-                "created": meeting.get("date", datetime.now().strftime("%Y-%m-%d %H:%M")),
-                "updated": meeting.get("date", datetime.now().strftime("%Y-%m-%d %H:%M")),
-            })
-    if "attachments" not in meeting:
-        meeting["attachments"] = []
-    if "votes" not in meeting:
-        meeting["votes"] = []
-    meeting.pop("notes", None)
-    return meeting
-
-def can_edit_note(note, username, is_admin):
-    if not note or not username:
-        return False
-    if is_admin:
-        return True
-    return note.get("author") == username
 
 MAX_MEETING_ATTACHMENT_BYTES = 3 * 1024 * 1024
 
@@ -1290,54 +1268,28 @@ def get_technical_indicators(ticker, _refresh_token=None):
         return None
 
 @st.cache_data(ttl=300)
+def _cached_ticker_info(ticker, _refresh_token=None):
+    return fetch_ticker_info(ticker)
+
+
 def get_fundamentals(ticker, _refresh_token=None):
-    """Tab 6 fundamentals — Current Price always from unified get_price (same as Tab 2)."""
-    _na_row = {
-        "Ticker": ticker,
-        "Company": "N/A",
-        "Industry": "N/A",
-        "Current Price": "N/A",
-        "Price Source": "unavailable — click Force Refresh on Tab 2",
-        "Market Cap": "N/A",
-        "50d SMA": "N/A",
-        "200d SMA": "N/A",
-        "Forward P/E": "N/A",
-        "Analyst Target": "N/A",
-        "Analysts": "N/A",
-        "3MMT EBIT": "N/A",
-        "12MMT EPS": "N/A",
-        "Forward EPS": "N/A",
-        "Cash (B)": "N/A",
-        "FCF (B)": "N/A",
-    }
+    """Tab 6 fundamentals — resilient fetch; never poisons cache with all-N/A rows."""
+    info = _cached_ticker_info(ticker, _refresh_token)
+    price, price_source = 0.0, ""
     try:
-        stock = yf.Ticker(ticker)
-        info = stock.info
         price, price_source = get_price_with_source(ticker)
-        analysts = info.get("numberOfAnalystOpinions")
-        forward_pe = info.get("forwardPE")
-        trailing_eps = info.get("trailingEps")
-        forward_eps = info.get("forwardEps")
-        return {
-            "Ticker": ticker,
-            "Company": info.get("longName", ticker) or ticker,
-            "Industry": info.get("industry", "N/A") or "N/A",
-            "Current Price": f"${price:.2f}" if price else "N/A",
-            "Price Source": price_source if price else "unavailable — click Force Refresh on Tab 2",
-            "Market Cap": f"${info.get('marketCap',0)/1e9:.2f}B" if info.get('marketCap') else "N/A",
-            "50d SMA": f"${info.get('fiftyDayAverage',0):.2f}" if info.get('fiftyDayAverage') else "N/A",
-            "200d SMA": f"${info.get('twoHundredDayAverage',0):.2f}" if info.get('twoHundredDayAverage') else "N/A",
-            "Forward P/E": f"{float(forward_pe):.2f}" if forward_pe else "N/A",
-            "Analyst Target": f"${info.get('targetMeanPrice',0):.2f}" if info.get('targetMeanPrice') else "N/A",
-            "Analysts": str(int(analysts)) if analysts else "N/A",
-            "3MMT EBIT": f"${info.get('ebitda',0)/1e9:.2f}B" if info.get('ebitda') else "N/A",
-            "12MMT EPS": f"{float(trailing_eps):.2f}" if trailing_eps else "N/A",
-            "Forward EPS": f"{float(forward_eps):.2f}" if forward_eps else "N/A",
-            "Cash (B)": f"${info.get('totalCash',0)/1e9:.2f}B" if info.get('totalCash') else "N/A",
-            "FCF (B)": f"${info.get('freeCashflow',0)/1e9:.2f}B" if info.get('freeCashflow') else "N/A",
-        }
-    except Exception:
-        return _na_row
+    except Exception as e:
+        print(f"[get_fundamentals] get_price_with_source({ticker}): {e}")
+        try:
+            price = get_price(ticker, _refresh_token=_refresh_token)
+            price_source = "get_price fallback"
+        except Exception as e2:
+            print(f"[get_fundamentals] get_price({ticker}): {e2}")
+    row = build_fundamentals_row(ticker, info, price, price_source)
+    if not fundamentals_row_is_healthy(row):
+        info = fetch_ticker_info(ticker)
+        row = build_fundamentals_row(ticker, info, price, price_source)
+    return row
 
 # ====================== INITIAL LOAD ======================
 members = load_members()
