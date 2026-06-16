@@ -49,6 +49,38 @@ def safe_int(val):
         return None
 
 
+def _statement_dollars(val):
+    """Finnhub statements are often in millions; yfinance uses raw dollars."""
+    v = safe_float(val)
+    if v is None or v == 0:
+        return None
+    if abs(v) < 1_000_000:
+        return v * 1_000_000
+    return v
+
+
+def _yf_latest_row_value(df, row_names):
+    if df is None or getattr(df, "empty", True):
+        return None
+    for name in row_names:
+        if name in df.index:
+            val = safe_float(df.loc[name].iloc[0])
+            if val is not None:
+                return val
+    return None
+
+
+def _finnhub_latest_statement(client, tkr, statement):
+    try:
+        data = client.financials(tkr, statement, "annual")
+        rows = (data or {}).get("financials") or []
+        if rows:
+            return rows[0] if isinstance(rows[0], dict) else {}
+    except Exception as e:
+        print(f"[fetch_ticker_info] finnhub financials {statement} {tkr}: {e}")
+    return {}
+
+
 def _merge_info(base, extra):
     """Merge extra into base without overwriting non-empty values."""
     out = dict(base or {})
@@ -157,6 +189,61 @@ def _fetch_yfinance_info(tkr):
     return merged
 
 
+def _fetch_yfinance_extras(tkr):
+    """Targeted yfinance calls when .info is partial on cloud (Render)."""
+    out = {}
+    try:
+        stock = yf.Ticker(tkr)
+        apt = stock.get_analyst_price_targets()
+        if apt:
+            target = safe_float(apt.get("mean") or apt.get("median"))
+            if target and target > 0:
+                out["targetMeanPrice"] = target
+    except Exception as e:
+        print(f"[fetch_ticker_info] yfinance analyst targets {tkr}: {e}")
+
+    try:
+        rec = yf.Ticker(tkr).recommendations_summary
+        if rec is not None and not rec.empty:
+            row = rec.iloc[0]
+            total = sum(
+                safe_int(row.get(col)) or 0
+                for col in ("strongBuy", "buy", "hold", "sell", "strongSell")
+            )
+            if total > 0:
+                out["numberOfAnalystOpinions"] = total
+    except Exception as e:
+        print(f"[fetch_ticker_info] yfinance recommendations {tkr}: {e}")
+
+    try:
+        stock = yf.Ticker(tkr)
+        cash = _yf_latest_row_value(
+            stock.balance_sheet,
+            (
+                "Cash And Cash Equivalents",
+                "Cash Cash Equivalents And Short Term Investments",
+                "Cash And Short Term Investments",
+            ),
+        )
+        if cash and cash > 0:
+            out["totalCash"] = cash
+        fcf = _yf_latest_row_value(stock.cashflow, ("Free Cash Flow",))
+        if fcf is not None:
+            out["freeCashflow"] = fcf
+        ebitda = _yf_latest_row_value(
+            stock.financials,
+            ("EBITDA", "Normalized EBITDA", "Operating Income"),
+        )
+        if ebitda and ebitda > 0:
+            out["ebitda"] = ebitda
+    except Exception as e:
+        print(f"[fetch_ticker_info] yfinance statements {tkr}: {e}")
+
+    if out:
+        out["_source"] = "yfinance_extras"
+    return out
+
+
 def _fetch_yahoo_chart_meta(tkr):
     res = _yahoo_chart_request(tkr, {"interval": "1d", "range": "1mo"})
     if not res:
@@ -170,10 +257,67 @@ def _fetch_yahoo_chart_meta(tkr):
     }
 
 
+def _fetch_finnhub_recommendations(tkr, client):
+    if client is None:
+        return {}
+    try:
+        trends = client.recommendation_trends(tkr)
+        if trends and isinstance(trends, list):
+            latest = trends[0] if trends else {}
+            if isinstance(latest, dict):
+                total = sum(
+                    safe_int(latest.get(col)) or 0
+                    for col in ("strongBuy", "buy", "hold", "sell", "strongSell")
+                )
+                if total > 0:
+                    return {"numberOfAnalystOpinions": total}
+    except Exception as e:
+        print(f"[fetch_ticker_info] finnhub recommendations {tkr}: {e}")
+    return {}
+
+
+def _fetch_finnhub_statements(tkr, client):
+    if client is None:
+        return {}
+    out = {}
+    ic = _finnhub_latest_statement(client, tkr, "ic")
+    bs = _finnhub_latest_statement(client, tkr, "bs")
+    cf = _finnhub_latest_statement(client, tkr, "cf")
+
+    ebitda = _statement_dollars(
+        ic.get("ebitda") or ic.get("ebit") or ic.get("operatingIncome")
+    )
+    if ebitda and ebitda > 0:
+        out["ebitda"] = ebitda
+
+    cash = _statement_dollars(
+        bs.get("cashAndCashEquivalents")
+        or bs.get("cashShortTermInvestments")
+        or bs.get("cashAndShortTermInvestments")
+        or bs.get("cash")
+    )
+    if cash and cash > 0:
+        out["totalCash"] = cash
+
+    fcf = _statement_dollars(cf.get("freeCashFlow"))
+    if not fcf:
+        ocf = _statement_dollars(cf.get("operatingCashFlow") or cf.get("netOperatingCashFlow"))
+        capex = _statement_dollars(cf.get("capitalExpenditure") or cf.get("capex"))
+        if ocf is not None and capex is not None:
+            fcf = ocf - abs(capex)
+    if fcf is not None:
+        out["freeCashflow"] = fcf
+
+    if out:
+        out["_source"] = "finnhub_statements"
+    return out
+
+
 def _fetch_finnhub_info(tkr, client):
     if client is None:
         return {}
     out = {}
+    shares = None
     try:
         profile = client.company_profile2(symbol=tkr)
         if profile:
@@ -184,6 +328,7 @@ def _fetch_finnhub_info(tkr, client):
             mc = safe_float(profile.get("marketCapitalization"))
             if mc and mc > 0:
                 out["marketCap"] = mc * 1_000_000
+            shares = safe_float(profile.get("shareOutstanding"))
     except Exception as e:
         print(f"[fetch_ticker_info] finnhub profile {tkr}: {e}")
 
@@ -191,12 +336,18 @@ def _fetch_finnhub_info(tkr, client):
         metrics = client.company_basic_financials(tkr, "all")
         metric = (metrics or {}).get("metric", {}) or {}
         mc_metric = safe_float(metric.get("marketCapitalization"))
+        ebitda_metric = safe_float(
+            metric.get("ebitdaTTM") or metric.get("ebitdaAnnual") or metric.get("ebitTTM")
+        )
+        if ebitda_metric and abs(ebitda_metric) < 1_000_000:
+            ebitda_metric *= 1_000_000
+        fcf_ps = safe_float(metric.get("pfcfShareTTM") or metric.get("pcfShareTTM"))
+        fcf_total = fcf_ps * shares * 1_000_000 if fcf_ps and shares else None
         out = _merge_info(out, {
             "trailingEps": metric.get("epsBasicExclExtraItemsTTM") or metric.get("epsTTM"),
             "forwardPE": metric.get("peBasicExclExtraTTM") or metric.get("peTTM"),
-            "ebitda": metric.get("ebitdaTTM") or metric.get("ebitda"),
-            "totalCash": metric.get("totalCash"),
-            "freeCashflow": metric.get("freeCashFlow") or metric.get("fcfTTM"),
+            "ebitda": ebitda_metric,
+            "freeCashflow": fcf_total,
         })
         if mc_metric and mc_metric > 0 and not out.get("marketCap"):
             out["marketCap"] = mc_metric * 1_000_000
@@ -205,13 +356,16 @@ def _fetch_finnhub_info(tkr, client):
 
     try:
         pt = client.price_target(tkr)
-        if pt:
+        if isinstance(pt, dict) and pt:
             out = _merge_info(out, {
                 "targetMeanPrice": pt.get("targetMean") or pt.get("targetMedian"),
                 "numberOfAnalystOpinions": pt.get("targetNumber") or pt.get("numberOfAnalysts"),
             })
     except Exception as e:
         print(f"[fetch_ticker_info] finnhub price_target {tkr}: {e}")
+
+    out = _merge_info(out, _fetch_finnhub_recommendations(tkr, client))
+    out = _merge_info(out, _fetch_finnhub_statements(tkr, client))
 
     if out:
         out["_source"] = "finnhub"
@@ -269,6 +423,7 @@ def fetch_ticker_info(ticker, finnhub_client=None, use_cache=True):
         merged = _merge_info(merged, _load_cached_fundamentals(tkr))
 
     merged = _merge_info(merged, _fetch_yfinance_info(tkr))
+    merged = _merge_info(merged, _fetch_yfinance_extras(tkr))
     merged = _merge_info(merged, _fetch_finnhub_info(tkr, _get_finnhub_client(finnhub_client)))
     merged = _merge_info(merged, _fetch_yahoo_chart_meta(tkr))
     merged = _merge_info(merged, _compute_smas_from_history(tkr))
@@ -339,6 +494,14 @@ def fundamentals_row_has_core_data(row):
     return any(row.get(c) not in (None, "", "N/A") for c in core_cols)
 
 
+def fundamentals_row_has_extended_data(row):
+    """True when analyst targets, cash, FCF, or EBIT columns are populated."""
+    if not row:
+        return False
+    extended_cols = ("Analyst Target", "Analysts", "3MMT EBIT", "Cash (B)", "FCF (B)")
+    return any(row.get(c) not in (None, "", "N/A") for c in extended_cols)
+
+
 def _probe_fields(data, fields):
     """Return comma-separated field names that have non-empty values."""
     found = []
@@ -400,7 +563,11 @@ def validate_data_sources(ticker="FSLR", finnhub_client=None):
         fh_info = _fetch_finnhub_info(tkr, client)
         fh_fields = _probe_fields(
             fh_info,
-            ("longName", "industry", "marketCap", "targetMeanPrice", "trailingEps", "forwardPE"),
+            (
+                "longName", "industry", "marketCap", "targetMeanPrice",
+                "numberOfAnalystOpinions", "ebitda", "totalCash", "freeCashflow",
+                "trailingEps", "forwardPE",
+            ),
         )
         if fh_fields:
             checks.append(_check_row("finnhub_fundamentals", True, f"{len(fh_fields)} fields", fh_fields))
@@ -454,12 +621,14 @@ def validate_data_sources(ticker="FSLR", finnhub_client=None):
     merged_fields = _probe_fields(merged, _CORE_INFO_FIELDS)
     row = build_fundamentals_row(tkr, merged, price=100.0, price_source="validation_probe")
     core_ok = fundamentals_row_has_core_data(row)
-    merge_ok = len(merged_fields) >= 2 and core_ok
+    extended_ok = fundamentals_row_has_extended_data(row)
+    merge_ok = len(merged_fields) >= 2 and core_ok and extended_ok
     checks.append({
         "source": "merged_tab6_row",
         "status": "ok" if merge_ok else ("warn" if core_ok else "fail"),
         "detail": (
-            f"completeness={_info_completeness(merged)} core_cols={'yes' if core_ok else 'no'}"
+            f"completeness={_info_completeness(merged)} core={'yes' if core_ok else 'no'} "
+            f"extended={'yes' if extended_ok else 'no'}"
             if merged_fields or core_ok
             else "merge produced no core fundamentals"
         ),

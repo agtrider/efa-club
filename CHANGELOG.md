@@ -1,5 +1,18 @@
 # EFA Investment Club — Changelog
 
+## 2026-06-16 (g) — Tab 6 extended fundamentals (target, cash, FCF, EBIT)
+
+**Root cause:** Finnhub `company_basic_financials` does not expose `totalCash` / `freeCashFlow` / analyst count under the keys we used; `price_target` is often empty on free tier. Render's partial yfinance `.info` also skips those fields.
+
+**Fix:** Layer additional sources:
+- Finnhub `price_target` + `recommendation_trends` (analyst count)
+- Finnhub `financials` (ic/bs/cf annual) for EBITDA, cash, FCF
+- yfinance `get_analyst_price_targets()`, `recommendations_summary`, and financial statements as fallback
+
+**Action:** Admin → Tab 6 → **Clear fundamentals cache** once after deploy, then reload Tab 6.
+
+---
+
 ## 2026-06-16 (f) — Data source validation (admin)
 
 **Added:** Sidebar Finnhub key status; Tab 6 **Admin → Validate data sources** probes Finnhub quote/fundamentals, Yahoo chart, yfinance, Supabase cache, history SMAs, and merged Tab 6 row for any ticker (default FSLR). **Clear fundamentals cache** button for stale partial entries.

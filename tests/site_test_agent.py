@@ -250,6 +250,61 @@ def test_yahoo_chart_fallback():
     return TestResult("yahoo_fallback").ok(f"FSLR={name} (source={source})")
 
 
+def test_extended_fundamentals_fields():
+    """Analyst target, analysts, EBIT, cash, FCF should populate for liquid tickers."""
+    from efa_club_services import (
+        build_fundamentals_row,
+        fetch_ticker_info,
+        fundamentals_row_has_extended_data,
+    )
+
+    failures = []
+    for t in PORTFOLIO_TICKERS[:5]:
+        info = fetch_ticker_info(t, use_cache=False)
+        row = build_fundamentals_row(t, info, price=100.0, price_source="test")
+        if not fundamentals_row_has_extended_data(row):
+            missing = [
+                c for c in ("Analyst Target", "Analysts", "3MMT EBIT", "Cash (B)", "FCF (B)")
+                if row.get(c) in (None, "", "N/A")
+            ]
+            failures.append(f"{t}: {', '.join(missing)}")
+    if failures:
+        return TestResult("extended_fundamentals_fields").fail("; ".join(failures))
+    return TestResult("extended_fundamentals_fields").ok("5/5 tickers with extended fundamentals")
+
+
+def test_partial_yfinance_extended_merge():
+    """Simulate Render: partial .info; targeted yfinance extras fill analyst/cash cols."""
+    from unittest.mock import patch
+    from efa_club_services import (
+        build_fundamentals_row,
+        fetch_ticker_info,
+        fundamentals_row_has_extended_data,
+    )
+
+    partial = {"longName": "First Solar, Inc.", "shortName": "FSLR"}
+    extras = {
+        "targetMeanPrice": 245.0,
+        "numberOfAnalystOpinions": 26,
+        "ebitda": 2_200_000_000,
+        "totalCash": 2_400_000_000,
+        "freeCashflow": 1_100_000_000,
+    }
+    with patch("efa_club_services._fetch_yfinance_info", return_value=partial):
+        with patch("efa_club_services._fetch_yfinance_extras", return_value=extras):
+            with patch("efa_club_services._fetch_finnhub_info", return_value={}):
+                with patch("efa_club_services._load_cached_fundamentals", return_value={}):
+                    with patch("efa_club_services._fetch_yahoo_chart_meta", return_value={}):
+                        with patch("efa_club_services._compute_smas_from_history", return_value={}):
+                            info = fetch_ticker_info("FSLR", use_cache=False)
+                            row = build_fundamentals_row("FSLR", info, 250.0, "test")
+    if not fundamentals_row_has_extended_data(row):
+        return TestResult("partial_yfinance_extended_merge").fail(
+            f"extended cols still N/A: Target={row.get('Analyst Target')} Cash={row.get('Cash (B)')}"
+        )
+    return TestResult("partial_yfinance_extended_merge").ok("partial .info + extras fills extended cols")
+
+
 def test_validate_data_sources():
     from efa_club_services import validate_data_sources
 
@@ -295,6 +350,8 @@ ALL_TESTS = [
     test_safe_float_edge_cases,
     test_fetch_ticker_info,
     test_partial_yfinance_merge,
+    test_partial_yfinance_extended_merge,
+    test_extended_fundamentals_fields,
     test_fundamentals_all_portfolio_watchlist,
     test_yahoo_chart_fallback,
     test_validate_data_sources,
