@@ -10,6 +10,7 @@ import os
 import pytz
 import requests
 import secrets
+import base64
 
 # ====================== PAGE CONFIG ======================
 st.set_page_config(
@@ -72,18 +73,33 @@ def load_from_supabase(key, default=None):
         print(f"Supabase load error for {key}: {e}")
         return default
 
+_LAST_SUPABASE_ERROR = ""
+
+def get_last_supabase_error():
+    return _LAST_SUPABASE_ERROR
+
 def save_to_supabase(key, value):
+    global _LAST_SUPABASE_ERROR
     if supabase is None:
+        _LAST_SUPABASE_ERROR = "Supabase not connected (check SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY on Render)."
         return False
-    try:
-        current = supabase.table("club_data").select("data").eq("id", 1).execute()
-        data_dict = current.data[0].get("data", {}) if current.data else {}
-        data_dict[key] = value
-        supabase.table("club_data").upsert({"id": 1, "data": data_dict}).execute()
-        return True
-    except Exception as e:
-        print(f"Supabase save error for {key}: {e}")
-        return False
+    _LAST_SUPABASE_ERROR = ""
+    for attempt in range(3):
+        try:
+            current = supabase.table("club_data").select("data").eq("id", 1).execute()
+            if not current.data:
+                _LAST_SUPABASE_ERROR = "club_data table row missing (id=1). Run the Supabase schema setup."
+                return False
+            data_dict = current.data[0].get("data", {}) or {}
+            if not isinstance(data_dict, dict):
+                data_dict = {}
+            data_dict[key] = value
+            supabase.table("club_data").upsert({"id": 1, "data": data_dict}).execute()
+            return True
+        except Exception as e:
+            _LAST_SUPABASE_ERROR = str(e)
+            print(f"Supabase save error for {key} (attempt {attempt + 1}): {e}")
+    return False
 
 # ====================== PERSISTENT LOGIN SESSIONS ======================
 SESSION_TTL_DAYS = 30
@@ -275,10 +291,116 @@ def normalize_availability_responses(responses, proposals):
     return responses
 
 def load_finalized_meetings():
-    return load_from_supabase("finalized_meetings", [])
+    meetings = load_from_supabase("finalized_meetings", [])
+    return [normalize_meeting_record(m) for m in (meetings or [])]
 
 def save_finalized_meetings(meetings):
-    save_to_supabase("finalized_meetings", meetings)
+    cleaned = [normalize_meeting_record(m) for m in meetings]
+    save_json("finalized_meetings.json", cleaned)
+    return save_to_supabase("finalized_meetings", cleaned)
+
+def load_meeting_attachment_store():
+    return load_from_supabase("meeting_attachment_store", {})
+
+def save_meeting_attachment_store(store):
+    return save_to_supabase("meeting_attachment_store", store)
+
+def load_access_log():
+    return load_from_supabase("access_log", [])
+
+def save_access_log(entries):
+    return save_to_supabase("access_log", entries)
+
+def log_site_access(username, action="visit"):
+    if not username:
+        return
+    try:
+        entries = load_access_log() or []
+        entries.insert(0, {
+            "username": username,
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "action": action,
+        })
+        save_access_log(entries[:500])
+    except Exception as e:
+        print(f"[access_log] {e}")
+
+def normalize_meeting_record(meeting):
+    """Migrate legacy single 'notes' string to note_entries + attachment refs."""
+    if not isinstance(meeting, dict):
+        return meeting
+    meeting = dict(meeting)
+    if "note_entries" not in meeting:
+        meeting["note_entries"] = []
+        legacy_notes = meeting.get("notes", "")
+        if isinstance(legacy_notes, str) and legacy_notes.strip():
+            meeting["note_entries"].append({
+                "id": 1,
+                "author": "Legacy Import",
+                "text": legacy_notes.strip(),
+                "created": meeting.get("date", datetime.now().strftime("%Y-%m-%d %H:%M")),
+                "updated": meeting.get("date", datetime.now().strftime("%Y-%m-%d %H:%M")),
+            })
+    if "attachments" not in meeting:
+        meeting["attachments"] = []
+    if "votes" not in meeting:
+        meeting["votes"] = []
+    meeting.pop("notes", None)
+    return meeting
+
+def can_edit_note(note, username, is_admin):
+    if not note or not username:
+        return False
+    if is_admin:
+        return True
+    return note.get("author") == username
+
+MAX_MEETING_ATTACHMENT_BYTES = 3 * 1024 * 1024
+
+def add_meeting_attachment(meeting, uploaded_file, username):
+    """Store file in separate Supabase key; meeting keeps only a download reference."""
+    if uploaded_file is None:
+        return False, "No file selected."
+    raw = uploaded_file.getvalue()
+    if len(raw) > MAX_MEETING_ATTACHMENT_BYTES:
+        return False, f"File too large ({len(raw) // 1024} KB). Max is {MAX_MEETING_ATTACHMENT_BYTES // 1024} KB."
+    meeting_id = meeting.get("id")
+    if not meeting_id:
+        return False, "Meeting is missing an id."
+    store = load_meeting_attachment_store() or {}
+    att_id = len(meeting.get("attachments", [])) + 1
+    file_key = f"m{meeting_id}_a{att_id}"
+    store[file_key] = {
+        "meeting_id": meeting_id,
+        "filename": uploaded_file.name,
+        "uploaded_by": username,
+        "uploaded_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "mime_type": uploaded_file.type or "application/octet-stream",
+        "size": len(raw),
+        "content_b64": base64.b64encode(raw).decode("ascii"),
+    }
+    if not save_meeting_attachment_store(store):
+        return False, get_last_supabase_error() or "Failed to save attachment."
+    meeting.setdefault("attachments", []).append({
+        "id": att_id,
+        "file_key": file_key,
+        "filename": uploaded_file.name,
+        "uploaded_by": username,
+        "uploaded_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "size": len(raw),
+    })
+    return True, ""
+
+def get_attachment_download(file_key):
+    store = load_meeting_attachment_store() or {}
+    entry = store.get(file_key)
+    if not entry:
+        return None, None, None
+    try:
+        data = base64.b64decode(entry["content_b64"])
+        return data, entry.get("filename", "download"), entry.get("mime_type", "application/octet-stream")
+    except Exception:
+        return None, None, None
 
 def load_grok_analyses():
     return load_from_supabase("grok_analyses", [])
@@ -649,6 +771,10 @@ if st.session_state.logged_in and not st.session_state.auth_session_id:
     st.session_state.auth_session_id = create_member_session(st.session_state.username)
 if st.session_state.logged_in and st.session_state.auth_session_id and not _query_param("sid"):
     _set_query_param("sid", st.session_state.auth_session_id)
+
+if st.session_state.logged_in and not st.session_state.get("access_logged_this_session"):
+    log_site_access(st.session_state.username, "login")
+    st.session_state.access_logged_this_session = True
 
 # ====================== STYLING ======================
 st.markdown("""
@@ -1503,13 +1629,30 @@ if st.sidebar.button("🔄 Refresh Data from Local Storage", key="refresh_btn"):
     st.rerun()
 
 if st.sidebar.button("Logout", key="logout_btn"):
+    log_site_access(st.session_state.username, "logout")
     revoke_member_session(st.session_state.get("auth_session_id") or _query_param("sid"))
     st.session_state.logged_in = False
     st.session_state.username = None
     st.session_state.is_admin = False
     st.session_state.auth_session_id = None
+    st.session_state.access_logged_this_session = False
     _clear_query_param("sid")
     st.rerun()
+
+if st.session_state.is_admin:
+    with st.sidebar.expander("📊 Member Access Tracker", expanded=False):
+        access_log = load_access_log() or []
+        if access_log:
+            log_df = pd.DataFrame(access_log)
+            if "timestamp" in log_df.columns:
+                log_df = log_df.sort_values("timestamp", ascending=False)
+            st.caption(f"Last {len(log_df)} events (most recent first)")
+            st.dataframe(log_df.head(50), width="stretch", hide_index=True)
+            members_seen = sorted(set(log_df.get("username", pd.Series(dtype=str)).dropna().tolist()))
+            st.write(f"**Unique members logged:** {len(members_seen)}")
+            st.write(", ".join(members_seen) if members_seen else "None yet")
+        else:
+            st.info("No access events yet. Events are recorded on login.")
 
 # ====================== TABS ======================
 tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
@@ -2379,7 +2522,8 @@ See you then!
                 "id": len(st.session_state.finalized_meetings) + 1,
                 "date": final_date.strftime('%Y-%m-%d'),
                 "time": final_time,
-                "notes": "",
+                "note_entries": [],
+                "attachments": [],
                 "votes": []
             }
             st.session_state.finalized_meetings.append(new_meeting)
@@ -2395,45 +2539,122 @@ See you then!
         st.markdown("### Scheduled Meetings")
         for idx, meeting in enumerate(st.session_state.finalized_meetings[:]):
             with st.expander(f"✅ {meeting['date']} at {meeting['time']}", expanded=False):
-                # --- Meeting Notes ---
-                st.markdown("**Meeting Notes / Minutes**")
-                current_notes = meeting.get("notes", "")
+                # --- Meeting Notes (multiple entries) ---
+                st.markdown("**Meeting Notes**")
+                st.caption("Each member can add notes. You may edit or delete only your own notes; admin can edit any note.")
+
+                meeting = normalize_meeting_record(st.session_state.finalized_meetings[idx])
+                st.session_state.finalized_meetings[idx] = meeting
+                note_entries = meeting.get("note_entries", [])
+                current_user = st.session_state.username
+                is_admin = st.session_state.is_admin
+
+                if note_entries:
+                    for n_idx, note in enumerate(note_entries):
+                        author = note.get("author", "Unknown")
+                        created = note.get("created", "")
+                        with st.container(border=True):
+                            st.markdown(f"**{author}** · {created}")
+                            if can_edit_note(note, current_user, is_admin):
+                                with st.form(key=f"edit_note_{idx}_{n_idx}"):
+                                    edited_text = st.text_area(
+                                        "Edit note",
+                                        value=note.get("text", ""),
+                                        height=100,
+                                        label_visibility="collapsed",
+                                    )
+                                    col_save, col_del = st.columns(2)
+                                    with col_save:
+                                        save_edit = st.form_submit_button("💾 Save Changes")
+                                    with col_del:
+                                        delete_note = st.form_submit_button("🗑️ Delete Note")
+                                    if save_edit:
+                                        st.session_state.finalized_meetings[idx]["note_entries"][n_idx]["text"] = edited_text.strip()
+                                        st.session_state.finalized_meetings[idx]["note_entries"][n_idx]["updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+                                        if save_finalized_meetings(st.session_state.finalized_meetings):
+                                            st.session_state.finalized_meetings = load_finalized_meetings()
+                                            st.success("Note updated!")
+                                            st.rerun()
+                                        else:
+                                            st.error(f"Save failed: {get_last_supabase_error()}")
+                                    if delete_note:
+                                        st.session_state.finalized_meetings[idx]["note_entries"].pop(n_idx)
+                                        if save_finalized_meetings(st.session_state.finalized_meetings):
+                                            st.session_state.finalized_meetings = load_finalized_meetings()
+                                            st.success("Note deleted.")
+                                            st.rerun()
+                                        else:
+                                            st.error(f"Save failed: {get_last_supabase_error()}")
+                            else:
+                                st.write(note.get("text", ""))
+                else:
+                    st.info("No notes yet. Add the first note below.")
+
+                with st.form(key=f"add_note_{idx}"):
+                    new_note_text = st.text_area(
+                        "Add a new note",
+                        height=100,
+                        placeholder="Decisions, discussion points, action items...",
+                    )
+                    if st.form_submit_button("➕ Add Note", type="primary"):
+                        if new_note_text.strip():
+                            next_id = max([n.get("id", 0) for n in note_entries], default=0) + 1
+                            st.session_state.finalized_meetings[idx].setdefault("note_entries", []).append({
+                                "id": next_id,
+                                "author": current_user,
+                                "text": new_note_text.strip(),
+                                "created": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                                "updated": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                            })
+                            if save_finalized_meetings(st.session_state.finalized_meetings):
+                                st.session_state.finalized_meetings = load_finalized_meetings()
+                                st.success("Note added!")
+                                st.rerun()
+                            else:
+                                st.error(f"Save failed: {get_last_supabase_error()}")
+                        else:
+                            st.warning("Note cannot be empty.")
+
+                st.markdown("**Meeting Attachments**")
+                st.caption("Upload AI transcripts/minutes as downloadable files (not pasted into notes). Max 3 MB per file.")
+
+                attachments = meeting.get("attachments", [])
+                if attachments:
+                    for att in attachments:
+                        file_key = att.get("file_key")
+                        file_data, filename, mime_type = get_attachment_download(file_key)
+                        label = f"📎 {att.get('filename', 'file')} — {att.get('uploaded_by', '?')} · {att.get('uploaded_at', '')}"
+                        if file_data:
+                            st.download_button(
+                                label=label,
+                                data=file_data,
+                                file_name=filename,
+                                mime=mime_type,
+                                key=f"dl_{idx}_{file_key}",
+                            )
+                        else:
+                            st.warning(f"{label} (file missing from storage)")
+                else:
+                    st.info("No attachments uploaded yet.")
 
                 uploaded_minutes = st.file_uploader(
-                    "Upload AI meeting minutes (TXT, MD, JSON, or CSV)",
-                    type=["txt", "md", "json", "csv"],
+                    "Upload AI meeting minutes",
+                    type=["txt", "md", "json", "csv", "pdf", "docx"],
                     key=f"minutes_upload_{idx}",
-                    help="Paste or upload exports from Otter.ai, Fireflies, Zoom AI Companion, etc.",
+                    help="Otter.ai, Fireflies, Zoom AI Companion, etc. Stored as a download — not shown inline.",
                 )
-                uploaded_text = ""
-                if uploaded_minutes is not None:
-                    try:
-                        uploaded_text = uploaded_minutes.getvalue().decode("utf-8", errors="replace").strip()
-                        if uploaded_text:
-                            st.caption(f"Loaded {len(uploaded_text):,} characters from {uploaded_minutes.name}")
-                    except Exception as e:
-                        st.error(f"Could not read file: {e}")
-
-                with st.form(key=f"meeting_notes_form_{idx}", clear_on_submit=False):
-                    notes_seed = current_notes
-                    if uploaded_text:
-                        header = f"\n\n--- Imported from {uploaded_minutes.name} ({datetime.now().strftime('%Y-%m-%d %H:%M')}) ---\n"
-                        notes_seed = (current_notes + header + uploaded_text).strip() if current_notes else uploaded_text
-                    new_notes = st.text_area(
-                        "Add or edit commentary / meeting minutes",
-                        value=notes_seed,
-                        height=180,
-                        placeholder="Paste meeting minutes, decisions, or discussion points here...",
+                if st.button("📤 Upload Attachment", key=f"upload_att_{idx}") and uploaded_minutes is not None:
+                    ok, err = add_meeting_attachment(
+                        st.session_state.finalized_meetings[idx],
+                        uploaded_minutes,
+                        current_user,
                     )
-                    submitted = st.form_submit_button("💾 Save Notes", type="primary")
-                    if submitted:
-                        st.session_state.finalized_meetings[idx]["notes"] = new_notes
-                        if save_finalized_meetings(st.session_state.finalized_meetings):
-                            st.session_state.finalized_meetings = load_finalized_meetings()
-                            st.success("Notes saved and persisted!")
-                            st.rerun()
-                        else:
-                            st.error("Failed to save notes to Supabase. You are still logged in — please try again.")
+                    if ok and save_finalized_meetings(st.session_state.finalized_meetings):
+                        st.session_state.finalized_meetings = load_finalized_meetings()
+                        st.success(f"Uploaded {uploaded_minutes.name}")
+                        st.rerun()
+                    else:
+                        st.error(err or get_last_supabase_error() or "Upload failed.")
 
                 st.divider()
 

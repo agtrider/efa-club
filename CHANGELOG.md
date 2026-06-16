@@ -1,5 +1,26 @@
 # EFA Investment Club — Changelog
 
+## 2026-06-16 (b) — Meeting notes v2, attachments, access tracker
+
+**Files changed:** `efa_club_app.py`
+
+### Problems fixed
+- Saving meeting notes failed when large AI transcripts were pasted inline (bloated Supabase `club_data` JSON).
+- Attachments were embedded in the notes text area instead of being downloadable files.
+- Single shared notes field — no per-member notes or edit permissions.
+
+### Solutions
+- **Multiple notes:** Each meeting has `note_entries` (author, text, timestamps). Members add notes; edit/delete own notes only; admin can edit any note.
+- **Attachments:** Files stored in separate Supabase key `meeting_attachment_store` (base64, max 3 MB). Meeting keeps download links only — not shown inline in notes.
+- **Save reliability:** `save_to_supabase` retries 3×, validates `club_data` row exists, surfaces error message in UI; local JSON fallback for meetings.
+- **Access tracker:** Admin sidebar **Member Access Tracker** — logs login/logout events per member (`access_log` in Supabase).
+
+### After deploy
+1. If an old meeting has a huge "Legacy Import" note, admin can delete it and re-upload the file as an attachment.
+2. Use **Add Note** for commentary; use **Upload Attachment** for AI transcripts.
+
+---
+
 ## 2026-06-16 — Auth persistence, scheduler fixes, Tab 6/9 overhaul (v1.1)
 
 **Commit:** Fix login refresh, meeting notes save, Tab 6 table errors, Tab 9 agent data quality  
