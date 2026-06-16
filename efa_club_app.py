@@ -988,6 +988,22 @@ def _cached_ticker_info(ticker, _refresh_token=None, _has_finnhub=False):
 
 def get_fundamentals(ticker, _refresh_token=None):
     """Tab 6 fundamentals — multi-source merge (yfinance + Finnhub + cache + history)."""
+    if os.environ.get("EFA_CI_MODE") == "1":
+        return build_fundamentals_row(
+            ticker,
+            {
+                "longName": f"{ticker} (CI)",
+                "industry": "Test",
+                "marketCap": 10_000_000_000,
+                "targetMeanPrice": 100.0,
+                "numberOfAnalystOpinions": 5,
+                "ebitda": 1_000_000_000,
+                "totalCash": 500_000_000,
+                "freeCashflow": 200_000_000,
+            },
+            price=50.0,
+            price_source="ci_mock",
+        )
     has_fh = FINNHUB_CLIENT is not None
     info = _cached_ticker_info(ticker, _refresh_token, has_fh)
     price, price_source = 0.0, ""

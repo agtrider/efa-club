@@ -56,4 +56,5 @@ jobs:
         run: pytest tests/test_ui_playwright.py -v
         env:
           GITHUB_ACTIONS: "true"
-          EFA_TEST_PASSWORD: "EFAIC2026002KC"
+          EFA_TEST_USER: "Antonio Calderon"
+          EFA_TEST_PASSWORD: "EFAIC2026001CA"
