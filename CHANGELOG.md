@@ -1,5 +1,15 @@
 # EFA Investment Club — Changelog
 
+## 2026-06-16 (e) — Tab 6 fundamentals multi-source fix
+
+**Root cause:** On Render, yfinance `.info` often returns **only company name** (partial dict). Old code returned early on any `longName`, skipping industry/targets. Yahoo chart fallback (used for prices) has **no** industry, market cap, or analyst targets.
+
+**Fix:** `fetch_ticker_info()` now merges: yfinance info + fast_info + **Finnhub** (profile, metrics, price target) + computed SMAs from history + **7-day Supabase cache**. Tab 6 warns if `FINNHUB_API_KEY` is missing.
+
+**Action:** Ensure `FINNHUB_API_KEY` is set on Render (same key as Tab 8 news). After deploy, visit Tab 6 once to warm cache.
+
+---
+
 ## 2026-06-16 (d) — CI, test suite, module split
 
 **Files added:** `.github/workflows/ci.yml`, `efa_club_persistence.py`, `efa_club_auth.py`, `efa_club_meetings.py`, `tests/test_auth.py`, `tests/test_supabase_persistence.py`, `tests/test_ui_playwright.py`, `requirements-dev.txt`, `pytest.ini`

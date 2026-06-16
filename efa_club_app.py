@@ -63,6 +63,7 @@ from efa_club_services import (
     build_fundamentals_row,
     can_edit_note,
     fetch_ticker_info,
+    fundamentals_row_has_core_data,
     fundamentals_row_is_healthy,
     normalize_meeting_record,
     normalize_availability_responses,
@@ -974,14 +975,15 @@ def get_technical_indicators(ticker, _refresh_token=None):
     except Exception:
         return None
 
-@st.cache_data(ttl=300)
-def _cached_ticker_info(ticker, _refresh_token=None):
-    return fetch_ticker_info(ticker)
+@st.cache_data(ttl=600)
+def _cached_ticker_info(ticker, _refresh_token=None, _has_finnhub=False):
+    return fetch_ticker_info(ticker, finnhub_client=FINNHUB_CLIENT)
 
 
 def get_fundamentals(ticker, _refresh_token=None):
-    """Tab 6 fundamentals — resilient fetch; never poisons cache with all-N/A rows."""
-    info = _cached_ticker_info(ticker, _refresh_token)
+    """Tab 6 fundamentals — multi-source merge (yfinance + Finnhub + cache + history)."""
+    has_fh = FINNHUB_CLIENT is not None
+    info = _cached_ticker_info(ticker, _refresh_token, has_fh)
     price, price_source = 0.0, ""
     try:
         price, price_source = get_price_with_source(ticker)
@@ -993,8 +995,8 @@ def get_fundamentals(ticker, _refresh_token=None):
         except Exception as e2:
             print(f"[get_fundamentals] get_price({ticker}): {e2}")
     row = build_fundamentals_row(ticker, info, price, price_source)
-    if not fundamentals_row_is_healthy(row):
-        info = fetch_ticker_info(ticker)
+    if fundamentals_row_is_healthy(row) and not fundamentals_row_has_core_data(row):
+        info = fetch_ticker_info(ticker, finnhub_client=FINNHUB_CLIENT, use_cache=True)
         row = build_fundamentals_row(ticker, info, price, price_source)
     return row
 
@@ -1866,7 +1868,13 @@ with tab6:
 
     # ====================== FUNDAMENTALS TABLES ======================
     if all_tickers:
-        st.markdown("### 📊 Fundamentals & Technicals (from yfinance)")
+        st.markdown("### 📊 Fundamentals & Technicals")
+        st.caption(
+            "Prices from Yahoo chart API (Tab 2). Fundamentals merge yfinance + Finnhub + 7-day Supabase cache. "
+            "If Industry/Target show N/A on Render, confirm FINNHUB_API_KEY is set, then click Force Refresh on Tab 2."
+        )
+        if FINNHUB_CLIENT is None:
+            st.warning("FINNHUB_API_KEY not set — Tab 6 fundamentals may show N/A on cloud when yfinance rate-limits.")
         if portfolio_tickers:
             st.markdown("#### Portfolio Holdings")
             _ftoken = st.session_state.get("price_refresh_token")

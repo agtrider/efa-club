@@ -5,14 +5,26 @@ Used by efa_club_app.py and tests/site_test_agent.py to prevent UI regressions.
 from __future__ import annotations
 
 import math
+import os
+from datetime import datetime, timedelta
+
 import requests
 import yfinance as yf
-from datetime import datetime
 
 _YAHOO_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 )
+
+_CORE_INFO_FIELDS = (
+    "industry",
+    "marketCap",
+    "targetMeanPrice",
+    "fiftyDayAverage",
+    "forwardPE",
+    "trailingEps",
+)
+_CACHE_TTL_HOURS = 168  # 7 days
 
 
 def safe_float(val):
@@ -37,6 +49,25 @@ def safe_int(val):
         return None
 
 
+def _merge_info(base, extra):
+    """Merge extra into base without overwriting non-empty values."""
+    out = dict(base or {})
+    for key, val in (extra or {}).items():
+        if str(key).startswith("_"):
+            continue
+        if val is None or val == "":
+            continue
+        if key not in out or out.get(key) in (None, "", 0):
+            out[key] = val
+    return out
+
+
+def _info_completeness(info):
+    if not info:
+        return 0
+    return sum(1 for k in _CORE_INFO_FIELDS if info.get(k) not in (None, "", 0))
+
+
 def _yahoo_chart_request(tkr, params):
     for host in ("query1", "query2"):
         try:
@@ -55,41 +86,201 @@ def _yahoo_chart_request(tkr, params):
     return None
 
 
-def fetch_ticker_info(ticker):
-    """yfinance .info with Yahoo chart meta fallback (works when yfinance rate-limits)."""
+def _load_cached_fundamentals(tkr):
+    try:
+        from efa_club_persistence import load_from_supabase
+        cache = load_from_supabase("fundamentals_cache", {}) or {}
+        entry = cache.get(tkr)
+        if not entry or not isinstance(entry, dict):
+            return {}
+        fetched_at = entry.get("fetched_at")
+        data = entry.get("data", {})
+        if fetched_at and data:
+            try:
+                age = datetime.now() - datetime.fromisoformat(fetched_at)
+                if age <= timedelta(hours=_CACHE_TTL_HOURS):
+                    data = dict(data)
+                    data["_source"] = "supabase_cache"
+                    return data
+            except Exception:
+                pass
+        return {}
+    except Exception:
+        return {}
+
+
+def _save_cached_fundamentals(tkr, info):
+    if _info_completeness(info) < 2:
+        return
+    try:
+        from efa_club_persistence import load_from_supabase, save_to_supabase
+        cache = load_from_supabase("fundamentals_cache", {}) or {}
+        cache[tkr] = {
+            "data": {k: v for k, v in info.items() if not str(k).startswith("_")},
+            "fetched_at": datetime.now().isoformat(),
+        }
+        save_to_supabase("fundamentals_cache", cache)
+    except Exception as e:
+        print(f"[fundamentals_cache] save {tkr}: {e}")
+
+
+def _fetch_yfinance_info(tkr):
+    merged = {}
+    try:
+        stock = yf.Ticker(tkr)
+        merged = _merge_info(merged, stock.info or {})
+    except Exception as e:
+        print(f"[fetch_ticker_info] yfinance info {tkr}: {e}")
+
+    try:
+        fi = getattr(yf.Ticker(tkr), "fast_info", {}) or {}
+        getter = getattr(fi, "get", None)
+
+        def _fi(*keys):
+            for key in keys:
+                val = getter(key) if getter else getattr(fi, key, None)
+                if val is not None:
+                    return val
+            return None
+
+        fast = {
+            "marketCap": _fi("market_cap", "marketCap"),
+            "fiftyDayAverage": _fi("fifty_day_average", "fiftyDayAverage"),
+            "twoHundredDayAverage": _fi("two_hundred_day_average", "twoHundredDayAverage"),
+        }
+        merged = _merge_info(merged, {k: v for k, v in fast.items() if v is not None})
+    except Exception as e:
+        print(f"[fetch_ticker_info] fast_info {tkr}: {e}")
+
+    if merged:
+        merged["_source"] = merged.get("_source", "yfinance")
+    return merged
+
+
+def _fetch_yahoo_chart_meta(tkr):
+    res = _yahoo_chart_request(tkr, {"interval": "1d", "range": "1mo"})
+    if not res:
+        return {}
+    meta = res.get("meta") or {}
+    return {
+        "longName": meta.get("longName") or meta.get("shortName"),
+        "shortName": meta.get("shortName"),
+        "regularMarketPrice": meta.get("regularMarketPrice"),
+        "_source": "yahoo_chart_meta",
+    }
+
+
+def _fetch_finnhub_info(tkr, client):
+    if client is None:
+        return {}
+    out = {}
+    try:
+        profile = client.company_profile2(symbol=tkr)
+        if profile:
+            out = _merge_info(out, {
+                "longName": profile.get("name"),
+                "industry": profile.get("finnhubIndustry"),
+            })
+            mc = safe_float(profile.get("marketCapitalization"))
+            if mc and mc > 0:
+                out["marketCap"] = mc * 1_000_000
+    except Exception as e:
+        print(f"[fetch_ticker_info] finnhub profile {tkr}: {e}")
+
+    try:
+        metrics = client.company_basic_financials(tkr, "all")
+        metric = (metrics or {}).get("metric", {}) or {}
+        mc_metric = safe_float(metric.get("marketCapitalization"))
+        out = _merge_info(out, {
+            "trailingEps": metric.get("epsBasicExclExtraItemsTTM") or metric.get("epsTTM"),
+            "forwardPE": metric.get("peBasicExclExtraTTM") or metric.get("peTTM"),
+            "ebitda": metric.get("ebitdaTTM") or metric.get("ebitda"),
+            "totalCash": metric.get("totalCash"),
+            "freeCashflow": metric.get("freeCashFlow") or metric.get("fcfTTM"),
+        })
+        if mc_metric and mc_metric > 0 and not out.get("marketCap"):
+            out["marketCap"] = mc_metric * 1_000_000
+    except Exception as e:
+        print(f"[fetch_ticker_info] finnhub metrics {tkr}: {e}")
+
+    try:
+        pt = client.price_target(tkr)
+        if pt:
+            out = _merge_info(out, {
+                "targetMeanPrice": pt.get("targetMean") or pt.get("targetMedian"),
+                "numberOfAnalystOpinions": pt.get("targetNumber") or pt.get("numberOfAnalysts"),
+            })
+    except Exception as e:
+        print(f"[fetch_ticker_info] finnhub price_target {tkr}: {e}")
+
+    if out:
+        out["_source"] = "finnhub"
+    return out
+
+
+def _compute_smas_from_history(tkr):
+    try:
+        df = yf.download(tkr, period="1y", interval="1d", progress=False, auto_adjust=True)
+        if df is None or df.empty:
+            return {}
+        close = df["Close"]
+        if isinstance(close, __import__("pandas").DataFrame):
+            close = close.iloc[:, 0]
+        close = close.dropna()
+        if close.empty:
+            return {}
+        out = {}
+        if len(close) >= 50:
+            out["fiftyDayAverage"] = float(close.rolling(50).mean().iloc[-1])
+        if len(close) >= 200:
+            out["twoHundredDayAverage"] = float(close.rolling(200).mean().iloc[-1])
+        if out:
+            out["_source"] = "computed_history"
+        return out
+    except Exception as e:
+        print(f"[fetch_ticker_info] history SMA {tkr}: {e}")
+        return {}
+
+
+def _get_finnhub_client(explicit_client=None):
+    if explicit_client is not None:
+        return explicit_client
+    key = os.environ.get("FINNHUB_API_KEY")
+    if not key:
+        return None
+    try:
+        import finnhub
+        return finnhub.Client(api_key=key)
+    except Exception:
+        return None
+
+
+def fetch_ticker_info(ticker, finnhub_client=None, use_cache=True):
+    """
+    Multi-source fundamentals merge. Never returns early on partial yfinance data.
+    On Render, yfinance often returns only longName — we layer Finnhub, cache, and history.
+    """
     tkr = str(ticker).upper().strip()
     if not tkr or tkr in ("CASH", "-"):
         return {}
 
-    try:
-        info = yf.Ticker(tkr).info or {}
-        if info.get("longName") or info.get("shortName") or info.get("marketCap"):
-            return info
-    except Exception as e:
-        print(f"[fetch_ticker_info] yfinance {tkr}: {e}")
+    merged = {}
+    if use_cache:
+        merged = _merge_info(merged, _load_cached_fundamentals(tkr))
 
-    res = _yahoo_chart_request(tkr, {"interval": "1d", "range": "1mo"})
-    if res:
-        meta = res.get("meta") or {}
-        return {
-            "longName": meta.get("longName") or meta.get("shortName") or tkr,
-            "shortName": meta.get("shortName", tkr),
-            "industry": meta.get("industry"),
-            "marketCap": meta.get("marketCap"),
-            "fiftyDayAverage": meta.get("fiftyDayAverage"),
-            "twoHundredDayAverage": meta.get("twoHundredDayAverage"),
-            "forwardPE": meta.get("forwardPE"),
-            "targetMeanPrice": meta.get("targetMeanPrice"),
-            "numberOfAnalystOpinions": meta.get("numberOfAnalystOpinions"),
-            "ebitda": meta.get("ebitda"),
-            "trailingEps": meta.get("trailingEps"),
-            "forwardEps": meta.get("forwardEps"),
-            "totalCash": meta.get("totalCash"),
-            "freeCashflow": meta.get("freeCashflow"),
-            "_source": "yahoo_chart_meta",
-        }
+    merged = _merge_info(merged, _fetch_yfinance_info(tkr))
+    merged = _merge_info(merged, _fetch_finnhub_info(tkr, _get_finnhub_client(finnhub_client)))
+    merged = _merge_info(merged, _fetch_yahoo_chart_meta(tkr))
+    merged = _merge_info(merged, _compute_smas_from_history(tkr))
 
-    return {"longName": tkr, "shortName": tkr, "_source": "ticker_fallback"}
+    if not merged.get("longName") and not merged.get("shortName"):
+        merged["longName"] = tkr
+        merged["_source"] = "ticker_fallback"
+
+    if _info_completeness(merged) >= 2:
+        _save_cached_fundamentals(tkr, merged)
+
+    return merged
 
 
 def build_fundamentals_row(ticker, info, price=0.0, price_source=""):
@@ -138,6 +329,14 @@ def fundamentals_row_is_healthy(row):
         return False
     company = row.get("Company", "")
     return company not in ("", "N/A", None) and row.get("Ticker") not in ("", None)
+
+
+def fundamentals_row_has_core_data(row):
+    """True when at least one key fundamental beyond price is populated."""
+    if not row:
+        return False
+    core_cols = ("Industry", "Market Cap", "Analyst Target", "50d SMA", "Forward P/E")
+    return any(row.get(c) not in (None, "", "N/A") for c in core_cols)
 
 
 def normalize_meeting_record(meeting):

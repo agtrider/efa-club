@@ -70,7 +70,12 @@ def test_syntax():
 # 2. Tab 6 fundamentals (core regression)
 # ---------------------------------------------------------------------------
 def test_fetch_ticker_info():
-    from efa_club_services import fetch_ticker_info, fundamentals_row_is_healthy, build_fundamentals_row
+    from efa_club_services import (
+        build_fundamentals_row,
+        fetch_ticker_info,
+        fundamentals_row_has_core_data,
+        fundamentals_row_is_healthy,
+    )
 
     failures = []
     for t in PORTFOLIO_TICKERS[:5]:
@@ -80,13 +85,41 @@ def test_fetch_ticker_info():
             failures.append(f"{t}: company={row.get('Company')}")
         elif row.get("Company") == "N/A":
             failures.append(f"{t}: Company still N/A")
+        elif not fundamentals_row_has_core_data(row):
+            failures.append(f"{t}: no core fundamentals (industry/target/cap)")
     if failures:
         return TestResult("tab6_fetch_ticker_info").fail("; ".join(failures))
-    return TestResult("tab6_fetch_ticker_info").ok(f"5/{5} tickers have company names")
+    return TestResult("tab6_fetch_ticker_info").ok(f"5/5 tickers with company + core fundamentals")
+
+
+def test_partial_yfinance_merge():
+    """Simulate Render: yfinance returns name only; history/Fast_info must fill gaps."""
+    from unittest.mock import patch
+    from efa_club_services import build_fundamentals_row, fetch_ticker_info, fundamentals_row_has_core_data
+
+    partial = {"longName": "First Solar, Inc.", "shortName": "FSLR", "symbol": "FSLR"}
+    with patch("efa_club_services._fetch_yfinance_info", return_value=partial):
+        with patch("efa_club_services._fetch_finnhub_info", return_value={}):
+            with patch("efa_club_services._load_cached_fundamentals", return_value={}):
+                with patch("efa_club_services._compute_smas_from_history") as mock_sma:
+                    mock_sma.return_value = {"fiftyDayAverage": 230.0, "twoHundredDayAverage": 200.0}
+                    with patch("efa_club_services._fetch_yahoo_chart_meta", return_value={}):
+                        info = fetch_ticker_info("FSLR", use_cache=False)
+                        row = build_fundamentals_row("FSLR", info, 250.0, "test")
+    if not fundamentals_row_has_core_data(row):
+        return TestResult("partial_yfinance_merge").fail(
+            f"partial yfinance merge failed: Industry={row.get('Industry')} SMA={row.get('50d SMA')}"
+        )
+    return TestResult("partial_yfinance_merge").ok("partial yfinance + history SMA fills gaps")
 
 
 def test_fundamentals_all_portfolio_watchlist():
-    from efa_club_services import fetch_ticker_info, build_fundamentals_row, fundamentals_row_is_healthy
+    from efa_club_services import (
+        build_fundamentals_row,
+        fetch_ticker_info,
+        fundamentals_row_has_core_data,
+        fundamentals_row_is_healthy,
+    )
 
     all_tickers = list(dict.fromkeys(PORTFOLIO_TICKERS + WATCHLIST_TICKERS))
     bad = []
@@ -94,15 +127,15 @@ def test_fundamentals_all_portfolio_watchlist():
     for t in all_tickers:
         info = fetch_ticker_info(t)
         row = build_fundamentals_row(t, info, price=50.0, price_source="test")
-        if fundamentals_row_is_healthy(row) and row.get("Company") != "N/A":
+        if fundamentals_row_is_healthy(row) and fundamentals_row_has_core_data(row):
             good += 1
         else:
-            bad.append(f"{t}→{row.get('Company')}")
+            bad.append(f"{t}→co={row.get('Company')} ind={row.get('Industry')}")
     if bad:
         return TestResult("tab6_all_tickers").fail(
             f"{good}/{len(all_tickers)} OK; failures: {', '.join(bad)}"
         )
-    return TestResult("tab6_all_tickers").ok(f"{good}/{len(all_tickers)} tickers healthy")
+    return TestResult("tab6_all_tickers").ok(f"{good}/{len(all_tickers)} tickers with core fundamentals")
 
 
 def test_safe_float_edge_cases():
@@ -237,6 +270,7 @@ ALL_TESTS = [
     test_local_data_files,
     test_safe_float_edge_cases,
     test_fetch_ticker_info,
+    test_partial_yfinance_merge,
     test_fundamentals_all_portfolio_watchlist,
     test_yahoo_chart_fallback,
     test_meeting_notes_permissions,
