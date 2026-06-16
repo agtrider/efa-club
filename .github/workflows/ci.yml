@@ -47,12 +47,11 @@ jobs:
         run: |
           pip install -r requirements.txt
           pip install -r requirements-dev.txt
-          playwright install --with-deps chromium
 
       - name: Seed CI fixtures
         run: python -c "from tests.ci_fixtures import seed_ci_fixtures; seed_ci_fixtures()"
 
-      - name: Run Playwright UI smoke tests
+      - name: Run Streamlit UI smoke tests (AppTest)
         run: pytest tests/test_ui_playwright.py -v
         env:
           GITHUB_ACTIONS: "true"
