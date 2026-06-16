@@ -672,6 +672,10 @@ def normalize_meeting_record(meeting):
         meeting["attachments"] = []
     if "votes" not in meeting:
         meeting["votes"] = []
+    else:
+        meeting["votes"] = [
+            normalize_vote_item(v) for v in (meeting.get("votes") or []) if isinstance(v, dict)
+        ]
     meeting.pop("notes", None)
     return meeting
 
@@ -682,6 +686,153 @@ def can_edit_note(note, username, is_admin):
     if is_admin:
         return True
     return note.get("author") == username
+
+
+VOTE_CHOICES = ("Yes", "No")
+VOTE_MAJORITY = 6
+VOTE_TOTAL_MEMBERS = 11
+
+
+def normalize_vote_item(vote):
+    """Ensure vote item has id, question, ballot dict, and created timestamp."""
+    if not isinstance(vote, dict):
+        return {
+            "id": 1,
+            "question": "",
+            "votes": {},
+            "created": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        }
+    vote = dict(vote)
+    ballot = vote.get("votes") or {}
+    if not isinstance(ballot, dict):
+        ballot = {}
+    cleaned = {}
+    for member, choice in ballot.items():
+        if member and str(choice) in VOTE_CHOICES:
+            cleaned[str(member)] = str(choice)
+    vote["votes"] = cleaned
+    vote.setdefault("question", "")
+    vote.setdefault("created", datetime.now().strftime("%Y-%m-%d %H:%M"))
+    if not vote.get("id"):
+        vote["id"] = 1
+    return vote
+
+
+def normalize_meeting_votes(meeting):
+    """Normalize all vote items on a finalized meeting."""
+    if not isinstance(meeting, dict):
+        return meeting
+    meeting = dict(meeting)
+    raw = meeting.get("votes") or []
+    if not isinstance(raw, list):
+        raw = []
+    meeting["votes"] = [normalize_vote_item(v) for v in raw]
+    return meeting
+
+
+def get_vote_ballot(vote):
+    vote = normalize_vote_item(vote)
+    return vote.get("votes") or {}
+
+
+def member_vote_choice(vote, username):
+    return get_vote_ballot(vote).get(username)
+
+
+def can_member_cast_vote(vote, username):
+    """Members may vote once per item; returns False if they already voted."""
+    if not username:
+        return False
+    return member_vote_choice(vote, username) is None
+
+
+def _apply_vote_item(vote, normalized):
+    """Write normalized vote fields back onto the live meeting dict."""
+    if isinstance(vote, dict) and isinstance(normalized, dict):
+        vote.clear()
+        vote.update(normalized)
+
+
+def record_member_vote(vote, username, choice):
+    """
+    Record a member vote. Fails if the member already voted (one vote per item).
+    Returns (ok, message). Mutates vote in place.
+    """
+    if not username:
+        return False, "Not logged in."
+    choice = str(choice).strip()
+    if choice not in VOTE_CHOICES:
+        return False, "Vote must be Yes or No."
+    normalized = normalize_vote_item(vote)
+    ballot = dict(normalized.get("votes") or {})
+    if username in ballot:
+        return False, f"You already voted **{ballot[username]}** on this item. Contact admin to change it."
+    ballot[username] = choice
+    normalized["votes"] = ballot
+    _apply_vote_item(vote, normalized)
+    return True, f"Your vote (**{choice}**) has been recorded."
+
+
+def admin_set_member_vote(vote, member, choice):
+    """Admin override — set or change any member's vote. None clears the vote."""
+    normalized = normalize_vote_item(vote)
+    ballot = dict(normalized.get("votes") or {})
+    if choice is None or str(choice).strip() in ("", "—", "Clear"):
+        ballot.pop(member, None)
+        normalized["votes"] = ballot
+        _apply_vote_item(vote, normalized)
+        return True, f"Cleared vote for {member}."
+    choice = str(choice).strip()
+    if choice not in VOTE_CHOICES:
+        return False, "Vote must be Yes or No."
+    ballot[member] = choice
+    normalized["votes"] = ballot
+    _apply_vote_item(vote, normalized)
+    return True, f"Set {member}'s vote to **{choice}**."
+
+
+def admin_update_vote_question(vote, question):
+    normalized = normalize_vote_item(vote)
+    q = str(question or "").strip()
+    if not q:
+        return False, "Question cannot be empty."
+    normalized["question"] = q
+    _apply_vote_item(vote, normalized)
+    return True, "Vote question updated."
+
+
+def next_vote_id(votes):
+    ids = []
+    for v in votes or []:
+        vid = safe_int((v or {}).get("id"))
+        if vid:
+            ids.append(vid)
+    return (max(ids) if ids else 0) + 1
+
+
+def delete_vote_by_id(meeting, vote_id):
+    """Remove a vote item by id. Returns (meeting, removed_bool)."""
+    meeting = normalize_meeting_votes(meeting)
+    vid = safe_int(vote_id)
+    before = len(meeting.get("votes") or [])
+    meeting["votes"] = [v for v in meeting.get("votes", []) if safe_int(v.get("id")) != vid]
+    return meeting, len(meeting.get("votes", [])) < before
+
+
+def tally_vote_ballot(ballot, total_members=VOTE_TOTAL_MEMBERS, majority=VOTE_MAJORITY):
+    ballot = ballot or {}
+    yes = sum(1 for v in ballot.values() if v == "Yes")
+    no = sum(1 for v in ballot.values() if v == "No")
+    cast = yes + no
+    pending = max(0, total_members - cast)
+    return {
+        "yes": yes,
+        "no": no,
+        "cast": cast,
+        "pending": pending,
+        "approved": yes >= majority,
+        "rejected": cast >= total_members and yes < majority,
+    }
 
 
 def normalize_availability_responses(responses, proposals):

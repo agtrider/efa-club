@@ -60,14 +60,24 @@ from efa_club_persistence import (
     supabase,
 )
 from efa_club_services import (
+    admin_set_member_vote,
+    admin_update_vote_question,
     build_fundamentals_row,
     can_edit_note,
+    can_member_cast_vote,
+    delete_vote_by_id,
     fetch_ticker_info,
     fundamentals_row_has_core_data,
     fundamentals_row_is_healthy,
+    member_vote_choice,
+    next_vote_id,
     normalize_meeting_record,
     normalize_availability_responses,
+    normalize_vote_item,
+    record_member_vote,
+    tally_vote_ballot,
     validate_data_sources,
+    VOTE_TOTAL_MEMBERS,
 )
 
 # ====================== PAGE CONFIG ======================
@@ -2380,12 +2390,17 @@ See you then!
 
                 # --- Voting Section ---
                 st.markdown("**Votes & Group Decisions**")
+                st.caption("Each member may vote **once** per item. Only admin can edit or remove votes after submission.")
 
                 if "votes" not in meeting:
                     st.session_state.finalized_meetings[idx]["votes"] = []
                     meeting["votes"] = []
 
-                votes = meeting.get("votes", [])
+                votes = [
+                    normalize_vote_item(v)
+                    for v in st.session_state.finalized_meetings[idx].get("votes", [])
+                ]
+                st.session_state.finalized_meetings[idx]["votes"] = votes
 
                 # Admin: Create new vote
                 if st.session_state.is_admin:
@@ -2395,56 +2410,143 @@ See you then!
                             placeholder="e.g. Does the group agree to buy $500 of PLTR at market?"
                         )
                         if st.form_submit_button("Create Vote"):
-                            if vote_question.strip():
-                                new_vote = {
-                                    "id": len(votes) + 1,
-                                    "question": vote_question.strip(),
-                                    "votes": {},
-                                    "created": datetime.now().strftime("%Y-%m-%d %H:%M")
-                                }
-                                st.session_state.finalized_meetings[idx]["votes"].append(new_vote)
-                                save_finalized_meetings(st.session_state.finalized_meetings)
-                                st.success("Vote created!")
-                                st.rerun()
+                            q = vote_question.strip()
+                            if q:
+                                existing_q = {v.get("question", "").strip().lower() for v in votes}
+                                if q.lower() in existing_q:
+                                    st.warning("A vote with this exact question already exists for this meeting.")
+                                else:
+                                    new_vote = {
+                                        "id": next_vote_id(votes),
+                                        "question": q,
+                                        "votes": {},
+                                        "created": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                                    }
+                                    st.session_state.finalized_meetings[idx]["votes"].append(new_vote)
+                                    save_finalized_meetings(st.session_state.finalized_meetings)
+                                    st.success("Vote created!")
+                                    st.rerun()
 
                 # Display existing votes
                 if votes:
+                    user = st.session_state.username
                     for v_idx, vote in enumerate(votes):
-                        st.markdown(f"**Vote #{vote.get('id', v_idx+1)}:** {vote.get('question', 'No question')}")
-                        
-                        user = st.session_state.username
-                        current_vote = vote.get("votes", {}).get(user)
+                        vote = normalize_vote_item(vote)
+                        st.session_state.finalized_meetings[idx]["votes"][v_idx] = vote
+                        vote_id = vote.get("id", v_idx + 1)
+                        st.markdown(f"**Vote #{vote_id}:** {vote.get('question', 'No question')}")
 
-                        # Voting UI
+                        if st.session_state.is_admin:
+                            with st.expander(f"👑 Admin: edit Vote #{vote_id}", expanded=False):
+                                with st.form(key=f"admin_edit_vote_{idx}_{v_idx}"):
+                                    new_q = st.text_input(
+                                        "Edit question",
+                                        value=vote.get("question", ""),
+                                        key=f"admin_vote_q_{idx}_{v_idx}",
+                                    )
+                                    if st.form_submit_button("Save question"):
+                                        ok, msg = admin_update_vote_question(
+                                            st.session_state.finalized_meetings[idx]["votes"][v_idx],
+                                            new_q,
+                                        )
+                                        if ok:
+                                            save_finalized_meetings(st.session_state.finalized_meetings)
+                                            st.success(msg)
+                                            st.rerun()
+                                        else:
+                                            st.error(msg)
+                                if st.button(
+                                    f"Delete Vote #{vote_id}",
+                                    key=f"admin_delete_vote_{idx}_{v_idx}",
+                                    type="secondary",
+                                ):
+                                    meeting_row, removed = delete_vote_by_id(
+                                        st.session_state.finalized_meetings[idx],
+                                        vote_id,
+                                    )
+                                    if removed:
+                                        st.session_state.finalized_meetings[idx] = meeting_row
+                                        save_finalized_meetings(st.session_state.finalized_meetings)
+                                        st.success(f"Vote #{vote_id} deleted.")
+                                        st.rerun()
+                                    else:
+                                        st.error("Could not delete vote item.")
+
+                                st.markdown("**Edit member votes**")
+                                for member_name in MEMBER_CREDENTIALS.keys():
+                                    current = member_vote_choice(vote, member_name) or "—"
+                                    col_m, col_c, col_s = st.columns([2, 1, 1])
+                                    with col_m:
+                                        st.write(member_name)
+                                    with col_c:
+                                        st.caption(current)
+                                    with col_s:
+                                        admin_choice = st.selectbox(
+                                            "Set",
+                                            ["—", "Yes", "No"],
+                                            index={"—": 0, "Yes": 1, "No": 2}.get(current, 0),
+                                            key=f"admin_vote_set_{idx}_{v_idx}_{member_name}",
+                                            label_visibility="collapsed",
+                                        )
+                                        if st.button(
+                                            "Apply",
+                                            key=f"admin_vote_apply_{idx}_{v_idx}_{member_name}",
+                                        ):
+                                            pick = None if admin_choice == "—" else admin_choice
+                                            ok, msg = admin_set_member_vote(
+                                                st.session_state.finalized_meetings[idx]["votes"][v_idx],
+                                                member_name,
+                                                pick,
+                                            )
+                                            if ok:
+                                                save_finalized_meetings(st.session_state.finalized_meetings)
+                                                st.success(msg)
+                                                st.rerun()
+                                            else:
+                                                st.error(msg)
+
+                        current_vote = member_vote_choice(vote, user)
                         col_vote, col_tally = st.columns([1, 1])
                         with col_vote:
-                            choice = st.radio(
-                                "Your vote",
-                                ["Yes", "No"],
-                                index=0 if current_vote == "Yes" else (1 if current_vote == "No" else 0),
-                                key=f"vote_choice_{idx}_{v_idx}",
-                                horizontal=True
-                            )
-                            if st.button("Submit / Update Vote", key=f"submit_vote_{idx}_{v_idx}"):
-                                if "votes" not in st.session_state.finalized_meetings[idx]["votes"][v_idx]:
-                                    st.session_state.finalized_meetings[idx]["votes"][v_idx]["votes"] = {}
-                                st.session_state.finalized_meetings[idx]["votes"][v_idx]["votes"][user] = choice
-                                save_finalized_meetings(st.session_state.finalized_meetings)
-                                st.success("Vote recorded!")
-                                st.rerun()
+                            if current_vote:
+                                st.info(f"Your vote: **{current_vote}** (locked — contact admin to change)")
+                            elif can_member_cast_vote(vote, user):
+                                choice = st.radio(
+                                    "Your vote",
+                                    ["Yes", "No"],
+                                    key=f"vote_choice_{idx}_{v_idx}",
+                                    horizontal=True,
+                                )
+                                if st.button("Submit Vote", key=f"submit_vote_{idx}_{v_idx}"):
+                                    target = st.session_state.finalized_meetings[idx]["votes"][v_idx]
+                                    ok, msg = record_member_vote(target, user, choice)
+                                    if ok:
+                                        save_finalized_meetings(st.session_state.finalized_meetings)
+                                        st.success(msg)
+                                        st.rerun()
+                                    else:
+                                        st.error(msg)
+                            else:
+                                st.warning("Unable to record vote — please refresh and try again.")
 
                         with col_tally:
-                            vote_dict = vote.get("votes", {})
-                            yes = sum(1 for v in vote_dict.values() if v == "Yes")
-                            no = sum(1 for v in vote_dict.values() if v == "No")
-                            st.metric("Yes", yes)
-                            st.metric("No", no)
-                            st.write(f"**Pending**: {11 - (yes + no)}")
+                            tally = tally_vote_ballot(vote.get("votes", {}))
+                            st.metric("Yes", tally["yes"])
+                            st.metric("No", tally["no"])
+                            st.write(f"**Pending**: {tally['pending']} / {VOTE_TOTAL_MEMBERS}")
 
-                            if yes >= 6:
+                            if tally["approved"]:
                                 st.success("✅ This vote has been **APPROVED** by majority (6 out of 11).")
-                            elif yes + no >= 11:
+                            elif tally["rejected"]:
                                 st.warning("This vote did not reach majority approval.")
+
+                            with st.expander("Who voted?", expanded=False):
+                                ballot = vote.get("votes") or {}
+                                if ballot:
+                                    for member_name, choice in sorted(ballot.items()):
+                                        st.write(f"• {member_name}: **{choice}**")
+                                else:
+                                    st.caption("No votes yet.")
 
                         st.caption(f"Created: {vote.get('created', 'N/A')}")
 

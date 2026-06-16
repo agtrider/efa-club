@@ -188,6 +188,45 @@ def test_meeting_notes_permissions():
     return TestResult("meeting_permissions").ok("migration + edit rules OK")
 
 
+def test_meeting_vote_rules():
+    from efa_club_services import (
+        admin_set_member_vote,
+        can_member_cast_vote,
+        delete_vote_by_id,
+        normalize_vote_item,
+        record_member_vote,
+        tally_vote_ballot,
+    )
+
+    vote = normalize_vote_item({"id": 1, "question": "Buy PLTR?", "votes": {}})
+    ok, _ = record_member_vote(vote, "Chris Koo", "Yes")
+    if not ok:
+        return TestResult("meeting_vote_rules").fail("first vote should succeed")
+    ok2, msg2 = record_member_vote(vote, "Chris Koo", "No")
+    if ok2:
+        return TestResult("meeting_vote_rules").fail("second vote should be blocked")
+    if not can_member_cast_vote(vote, "Chris Koo"):
+        pass
+    else:
+        return TestResult("meeting_vote_rules").fail("Chris should be locked after voting")
+    if not can_member_cast_vote(vote, "Jeff Gragert"):
+        return TestResult("meeting_vote_rules").fail("Jeff should still be able to vote")
+
+    ok3, _ = admin_set_member_vote(vote, "Chris Koo", "No")
+    if not ok3 or vote["votes"].get("Chris Koo") != "No":
+        return TestResult("meeting_vote_rules").fail("admin override failed")
+
+    tally = tally_vote_ballot(vote["votes"])
+    if tally["yes"] != 0 or tally["no"] != 1:
+        return TestResult("meeting_vote_rules").fail(f"unexpected tally: {tally}")
+
+    meeting = {"id": 1, "votes": [vote, {"id": 2, "question": "dup", "votes": {}}]}
+    meeting, removed = delete_vote_by_id(meeting, 2)
+    if not removed or len(meeting["votes"]) != 1:
+        return TestResult("meeting_vote_rules").fail("admin delete vote failed")
+    return TestResult("meeting_vote_rules").ok("one vote per member + admin edit/delete")
+
+
 # ---------------------------------------------------------------------------
 # 4. Multi-agent orchestrator (Tab 9)
 # ---------------------------------------------------------------------------
@@ -368,6 +407,7 @@ ALL_TESTS = [
     test_yahoo_chart_fallback,
     test_validate_data_sources,
     test_meeting_notes_permissions,
+    test_meeting_vote_rules,
     test_orchestrator_cycle,
 ]
 
