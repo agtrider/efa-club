@@ -22,4 +22,10 @@
 
 This document will evolve as we test.
 
-Last Updated: April 2026
+Last Updated: June 2026
+
+## Tab 9 agent notes (v1.1)
+- Agents **suggest** actions only; all trades require club consensus and human execution.
+- Recommendations use live club prices and daily-history indicators — re-run analysis after major market moves.
+- Exit targets blend analyst consensus with goal-aware adjustments; treat as review levels, not guaranteed outcomes.
+- Low `data_quality` or confidence below 50% → treat signals as informational, not actionable.

@@ -1,5 +1,38 @@
 # EFA Investment Club — Changelog
 
+## 2026-06-16 — Auth persistence, scheduler fixes, Tab 6/9 overhaul (v1.1)
+
+**Commit:** Fix login refresh, meeting notes save, Tab 6 table errors, Tab 9 agent data quality  
+**Files changed:** `efa_club_app.py`, `efa-trading-agent/agents/research.py`, `efa-trading-agent/agents/orchestrator.py`
+
+### Problems fixed
+- **Meeting Scheduler (Tab 7):** Saving meeting notes could reset the page and return users to the login screen; no feedback when Supabase writes failed.
+- **Login:** Browser refresh logged users out because auth lived only in ephemeral Streamlit `session_state`.
+- **Tab 6:** Portfolio and watchlist fundamentals tables errored when yfinance failed — `NumberColumn` received `"N/A"` strings and mixed numeric/text types in `Forward P/E`, `Analysts`, and EPS fields.
+- **Tab 9:** Exit targets, confidence, RSI, and MACD showed stale or synthetic values; multiple timestamped tables cluttered the UI; reasons were too brief.
+
+### Solutions
+- **Persistent login:** Supabase-backed `member_sessions` with 30-day tokens; `sid` query param restores session on refresh. Logout revokes the token. Auto-login on password typing removed (Login button only).
+- **Meeting notes:** Notes save inside a `st.form` with explicit Supabase success/error handling. Added file upload for AI meeting minutes (TXT, MD, JSON, CSV) from Otter, Fireflies, Zoom AI Companion, etc.
+- **Tab 6:** All fundamentals columns use `TextColumn` with consistent string formatting; Grok analyze checks for API key before running.
+- **Tab 9 (v1.1):**
+  - `build_agent_context()` passes live club prices + daily close history into agents (same sources as Tab 2).
+  - Research agent v8 and orchestrator v1.1 compute real RSI/MACD from history; richer plain-language reasons.
+  - UI shows **latest run only** for portfolio and watchlist (full history still stored in Supabase).
+  - Added **Field Definitions** expander below the analysis tables.
+
+### After deploy on Render
+1. Wait for Render to finish building from `main` (auto-deploy when GitHub hook is connected).
+2. Log in once — URL will include `?sid=...` for refresh persistence.
+3. **Tab 9:** Run **Analyze Full Portfolio** and **Run Watchlist Review** to refresh with live data.
+4. **Tab 7:** Test saving notes and uploading AI meeting minutes.
+5. **Tab 2 (optional):** Force Refresh Live Prices if any quotes look stale.
+
+### Validation (local, 2026-06-16)
+- `python -m py_compile` passed on `efa_club_app.py`, `research.py`, `orchestrator.py`.
+
+---
+
 ## 2026-06-12 — Session-aware live prices (Yahoo chart primary)
 
 **Commit:** Session-aware Yahoo chart pricing; fix yfinance fast_info keys and cache fallback  

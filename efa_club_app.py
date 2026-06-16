@@ -9,6 +9,7 @@ from pathlib import Path
 import os
 import pytz
 import requests
+import secrets
 
 # ====================== PAGE CONFIG ======================
 st.set_page_config(
@@ -83,6 +84,90 @@ def save_to_supabase(key, value):
     except Exception as e:
         print(f"Supabase save error for {key}: {e}")
         return False
+
+# ====================== PERSISTENT LOGIN SESSIONS ======================
+SESSION_TTL_DAYS = 30
+
+def _query_param(name):
+    try:
+        val = st.query_params.get(name)
+        if isinstance(val, list):
+            return val[0] if val else None
+        return val
+    except Exception:
+        return None
+
+def _set_query_param(name, value):
+    try:
+        st.query_params[name] = value
+    except Exception as e:
+        print(f"[auth] could not set query param {name}: {e}")
+
+def _clear_query_param(name):
+    try:
+        if name in st.query_params:
+            del st.query_params[name]
+    except Exception:
+        try:
+            st.query_params.clear()
+        except Exception:
+            pass
+
+def load_member_sessions():
+    return load_from_supabase("member_sessions", {})
+
+def save_member_sessions(sessions):
+    return save_to_supabase("member_sessions", sessions)
+
+def create_member_session(username):
+    session_id = secrets.token_urlsafe(32)
+    sessions = load_member_sessions()
+    sessions[session_id] = {
+        "username": username,
+        "created": datetime.now().isoformat(),
+        "expires": (datetime.now() + timedelta(days=SESSION_TTL_DAYS)).isoformat(),
+    }
+    expired = [
+        sid for sid, meta in sessions.items()
+        if datetime.fromisoformat(meta.get("expires", "2000-01-01")) < datetime.now()
+    ]
+    for sid in expired:
+        sessions.pop(sid, None)
+    save_member_sessions(sessions)
+    return session_id
+
+def revoke_member_session(session_id):
+    if not session_id:
+        return
+    sessions = load_member_sessions()
+    if session_id in sessions:
+        sessions.pop(session_id, None)
+        save_member_sessions(sessions)
+
+def restore_login_from_session():
+    if st.session_state.get("logged_in"):
+        return True
+    session_id = _query_param("sid")
+    if not session_id:
+        return False
+    sessions = load_member_sessions()
+    meta = sessions.get(session_id)
+    if not meta:
+        return False
+    try:
+        if datetime.fromisoformat(meta.get("expires", "2000-01-01")) < datetime.now():
+            revoke_member_session(session_id)
+            return False
+    except Exception:
+        return False
+    username = meta.get("username")
+    if username not in MEMBER_CREDENTIALS:
+        return False
+    st.session_state.logged_in = True
+    st.session_state.username = username
+    st.session_state.is_admin = (username == "Antonio Calderon")
+    st.session_state.auth_session_id = session_id
+    return True
 
 # ====================== ALL DATA FUNCTIONS (Supabase) ======================
 def load_members():
@@ -518,6 +603,8 @@ if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
     st.session_state.username = None
     st.session_state.is_admin = False
+if "auth_session_id" not in st.session_state:
+    st.session_state.auth_session_id = None
 
 MEMBER_CREDENTIALS = {
     "Antonio Calderon": {"email": "acal721@gmail.com", "password": "EFAIC2026001CA"},
@@ -539,19 +626,29 @@ def login_page():
     username = st.selectbox("Select your name", options=list(MEMBER_CREDENTIALS.keys()))
     email_input = st.text_input("Email (Login ID)", value=MEMBER_CREDENTIALS[username]["email"], disabled=True)
     password = st.text_input("Password", type="password")
-    if st.button("Login", type="primary") or password == MEMBER_CREDENTIALS[username]["password"]:
+    if st.button("Login", type="primary"):
         if password == MEMBER_CREDENTIALS[username]["password"]:
+            session_id = create_member_session(username)
             st.session_state.logged_in = True
             st.session_state.username = username
             st.session_state.is_admin = (username == "Antonio Calderon")
+            st.session_state.auth_session_id = session_id
+            _set_query_param("sid", session_id)
             st.success(f"✅ Welcome back, {username}!")
             st.rerun()
         else:
             st.error("❌ Incorrect password.")
 
+restore_login_from_session()
+
 if not st.session_state.logged_in:
     login_page()
     st.stop()
+
+if st.session_state.logged_in and not st.session_state.auth_session_id:
+    st.session_state.auth_session_id = create_member_session(st.session_state.username)
+if st.session_state.logged_in and st.session_state.auth_session_id and not _query_param("sid"):
+    _set_query_param("sid", st.session_state.auth_session_id)
 
 # ====================== STYLING ======================
 st.markdown("""
@@ -781,6 +878,48 @@ def get_price(ticker, _refresh_token=None):
         print(f"[get_price] {tkr} error: {e}")
         cached_price, _ = _cached_market_price(tkr)
         return cached_price if cached_price > 0 else 0.0
+
+
+@st.cache_data(ttl=300)
+def get_close_history(ticker, _refresh_token=None, days=200):
+    """Daily close history for technical indicators (shared by Tab 6 and Tab 9 agents)."""
+    tkr = str(ticker).upper().strip()
+    if not tkr:
+        return []
+    try:
+        df = _yf_download(tkr, period="1y", interval="1d")
+        close = _extract_close_series(df)
+        if close.empty:
+            stock = yf.Ticker(tkr)
+            hist = _yf_history(stock, period="1y", auto_adjust=True)
+            if not hist.empty and "Close" in hist.columns:
+                close = hist["Close"]
+        if close.empty:
+            return []
+        return [float(x) for x in close.dropna().tolist()[-days:]]
+    except Exception as e:
+        print(f"[get_close_history] {tkr}: {e}")
+        return []
+
+
+def build_agent_context(ticker, goals=None):
+    """Shared live price + history context for the multi-agent orchestrator."""
+    live_price = get_price(ticker)
+    close_prices = get_close_history(ticker, _refresh_token=st.session_state.get("price_refresh_token"))
+    analyst_target = None
+    try:
+        info = yf.Ticker(ticker).info
+        raw_target = info.get("targetMeanPrice")
+        if raw_target and float(raw_target) > 0:
+            analyst_target = float(raw_target)
+    except Exception:
+        pass
+    return {
+        "goals": goals or {},
+        "live_price": live_price if live_price > 0 else None,
+        "close_prices": close_prices,
+        "analyst_target": analyst_target,
+    }
 
 
 # ====================== MARKET HOURS + AUTO SNAPSHOT HELPERS ======================
@@ -1027,35 +1166,52 @@ def get_technical_indicators(ticker, _refresh_token=None):
 @st.cache_data(ttl=300)
 def get_fundamentals(ticker, _refresh_token=None):
     """Tab 6 fundamentals — Current Price always from unified get_price (same as Tab 2)."""
+    _na_row = {
+        "Ticker": ticker,
+        "Company": "N/A",
+        "Industry": "N/A",
+        "Current Price": "N/A",
+        "Price Source": "unavailable — click Force Refresh on Tab 2",
+        "Market Cap": "N/A",
+        "50d SMA": "N/A",
+        "200d SMA": "N/A",
+        "Forward P/E": "N/A",
+        "Analyst Target": "N/A",
+        "Analysts": "N/A",
+        "3MMT EBIT": "N/A",
+        "12MMT EPS": "N/A",
+        "Forward EPS": "N/A",
+        "Cash (B)": "N/A",
+        "FCF (B)": "N/A",
+    }
     try:
         stock = yf.Ticker(ticker)
         info = stock.info
         price, price_source = get_price_with_source(ticker)
-        analysts = info.get("numberOfAnalystOpinions") or 0
+        analysts = info.get("numberOfAnalystOpinions")
+        forward_pe = info.get("forwardPE")
+        trailing_eps = info.get("trailingEps")
+        forward_eps = info.get("forwardEps")
         return {
             "Ticker": ticker,
-            "Company": info.get("longName", ticker),
-            "Industry": info.get("industry", "N/A"),
+            "Company": info.get("longName", ticker) or ticker,
+            "Industry": info.get("industry", "N/A") or "N/A",
             "Current Price": f"${price:.2f}" if price else "N/A",
             "Price Source": price_source if price else "unavailable — click Force Refresh on Tab 2",
             "Market Cap": f"${info.get('marketCap',0)/1e9:.2f}B" if info.get('marketCap') else "N/A",
             "50d SMA": f"${info.get('fiftyDayAverage',0):.2f}" if info.get('fiftyDayAverage') else "N/A",
             "200d SMA": f"${info.get('twoHundredDayAverage',0):.2f}" if info.get('twoHundredDayAverage') else "N/A",
-            "Forward P/E": info.get("forwardPE", "N/A"),
+            "Forward P/E": f"{float(forward_pe):.2f}" if forward_pe else "N/A",
             "Analyst Target": f"${info.get('targetMeanPrice',0):.2f}" if info.get('targetMeanPrice') else "N/A",
-            "Analysts": int(analysts),
+            "Analysts": str(int(analysts)) if analysts else "N/A",
             "3MMT EBIT": f"${info.get('ebitda',0)/1e9:.2f}B" if info.get('ebitda') else "N/A",
-            "12MMT EPS": info.get("trailingEps", "N/A"),
-            "Forward EPS": info.get("forwardEps", "N/A"),
+            "12MMT EPS": f"{float(trailing_eps):.2f}" if trailing_eps else "N/A",
+            "Forward EPS": f"{float(forward_eps):.2f}" if forward_eps else "N/A",
             "Cash (B)": f"${info.get('totalCash',0)/1e9:.2f}B" if info.get('totalCash') else "N/A",
             "FCF (B)": f"${info.get('freeCashflow',0)/1e9:.2f}B" if info.get('freeCashflow') else "N/A",
         }
     except Exception:
-        return {k: "N/A" for k in [
-            "Ticker", "Company", "Industry", "Current Price", "Price Source",
-            "Market Cap", "50d SMA", "200d SMA", "Forward P/E", "Analyst Target",
-            "Analysts", "3MMT EBIT", "12MMT EPS", "Forward EPS", "Cash (B)", "FCF (B)",
-        ]}
+        return _na_row
 
 # ====================== INITIAL LOAD ======================
 members = load_members()
@@ -1347,7 +1503,12 @@ if st.sidebar.button("🔄 Refresh Data from Local Storage", key="refresh_btn"):
     st.rerun()
 
 if st.sidebar.button("Logout", key="logout_btn"):
+    revoke_member_session(st.session_state.get("auth_session_id") or _query_param("sid"))
     st.session_state.logged_in = False
+    st.session_state.username = None
+    st.session_state.is_admin = False
+    st.session_state.auth_session_id = None
+    _clear_query_param("sid")
     st.rerun()
 
 # ====================== TABS ======================
@@ -1883,22 +2044,22 @@ with tab6:
 
     # ====================== COLUMN CONFIG ======================
     fundamentals_column_config = {
-        "Ticker": st.column_config.TextColumn("Ticker", width=70),
-        "Company": st.column_config.TextColumn("Company", width=200),
-        "Industry": st.column_config.TextColumn("Industry", width=160),
-        "Current Price": st.column_config.TextColumn("Current Price", width=95),
-        "Price Source": st.column_config.TextColumn("Price Source", width=180),
-        "Market Cap": st.column_config.TextColumn("Market Cap", width=90),
-        "50d SMA": st.column_config.TextColumn("50d SMA", width=85),
-        "200d SMA": st.column_config.TextColumn("200d SMA", width=85),
-        "Forward P/E": st.column_config.TextColumn("Forward P/E", width=85),
-        "Analyst Target": st.column_config.TextColumn("Analyst Target", width=95),
-        "Analysts": st.column_config.NumberColumn("Analysts", width=70),
-        "3MMT EBIT": st.column_config.TextColumn("3MMT EBIT", width=90),
-        "12MMT EPS": st.column_config.TextColumn("12MMT EPS", width=85),
-        "Forward EPS": st.column_config.TextColumn("Forward EPS", width=85),
-        "Cash (B)": st.column_config.TextColumn("Cash (B)", width=85),
-        "FCF (B)": st.column_config.TextColumn("FCF (B)", width=85),
+        "Ticker": st.column_config.TextColumn("Ticker"),
+        "Company": st.column_config.TextColumn("Company"),
+        "Industry": st.column_config.TextColumn("Industry"),
+        "Current Price": st.column_config.TextColumn("Current Price"),
+        "Price Source": st.column_config.TextColumn("Price Source"),
+        "Market Cap": st.column_config.TextColumn("Market Cap"),
+        "50d SMA": st.column_config.TextColumn("50d SMA"),
+        "200d SMA": st.column_config.TextColumn("200d SMA"),
+        "Forward P/E": st.column_config.TextColumn("Forward P/E"),
+        "Analyst Target": st.column_config.TextColumn("Analyst Target"),
+        "Analysts": st.column_config.TextColumn("Analysts"),
+        "3MMT EBIT": st.column_config.TextColumn("3MMT EBIT"),
+        "12MMT EPS": st.column_config.TextColumn("12MMT EPS"),
+        "Forward EPS": st.column_config.TextColumn("Forward EPS"),
+        "Cash (B)": st.column_config.TextColumn("Cash (B)"),
+        "FCF (B)": st.column_config.TextColumn("FCF (B)"),
     }
 
     # ====================== FUNDAMENTALS TABLES ======================
@@ -1923,17 +2084,19 @@ with tab6:
     selected = st.multiselect("Select tickers to analyze/update", all_tickers, default=all_tickers[:5])
 
     if st.button("🔄 Analyze/Update Selected Tickers", type="primary") and selected:
-        with st.spinner("Calling Grok for rich moonshot analysis..."):
-            for ticker in selected:
-                display_ticker = ticker
-                if ticker.upper() == "TE":
-                    display_ticker = "TE (T1 Energy Inc. - NYSE)"
+        if client is None:
+            st.error("Grok API key not configured. Add GROK_API_KEY to environment variables.")
+        else:
+            with st.spinner("Calling Grok for rich moonshot analysis..."):
+                for ticker in selected:
+                    display_ticker = ticker
+                    if ticker.upper() == "TE":
+                        display_ticker = "TE (T1 Energy Inc. - NYSE)"
 
-                fund_data = get_fundamentals(ticker)
-                company_name = fund_data.get("Company", ticker)
+                    fund_data = get_fundamentals(ticker)
+                    company_name = fund_data.get("Company", ticker)
 
-                # ====================== IMPROVED PROMPT ======================
-                prompt = f"""You are a senior investment analyst for the Equity for All Investment Club (EFAIC).
+                    prompt = f"""You are a senior investment analyst for the Equity for All Investment Club (EFAIC).
 
 We are looking for high-conviction moonshot opportunities with realistic 2X+ potential over 18-24 months. Be honest, data-driven, and balanced about both upside and risks.
 
@@ -1965,35 +2128,36 @@ Return your response in this exact JSON structure:
 
 Now analyze: {ticker} ({company_name})"""
 
-                try:
-                    response = client.chat.completions.create(
-                        model="grok-4-1-fast",
-                        messages=[{"role": "user", "content": prompt}],
-                        temperature=0.5,
-                        max_tokens=1600
-                    )
-                    content = response.choices[0].message.content.strip()
+                    try:
+                        response = client.chat.completions.create(
+                            model="grok-4-1-fast",
+                            messages=[{"role": "user", "content": prompt}],
+                            temperature=0.5,
+                            max_tokens=1600
+                        )
+                        content = response.choices[0].message.content.strip()
 
-                    import json, re
-                    json_match = re.search(r'\{.*\}', content, re.DOTALL)
-                    parsed = json.loads(json_match.group()) if json_match else {"raw": content}
+                        import json, re
+                        json_match = re.search(r'\{.*\}', content, re.DOTALL)
+                        parsed = json.loads(json_match.group()) if json_match else {"raw": content}
 
-                    new_entry = {
-                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                        "ticker": ticker,
-                        "analysis": content,
-                        "parsed": parsed,
-                        "tokens": response.usage.total_tokens if hasattr(response, 'usage') else 0
-                    }
-                    st.session_state.grok_analyses.append(new_entry)
+                        new_entry = {
+                            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                            "ticker": ticker,
+                            "analysis": content,
+                            "parsed": parsed,
+                            "tokens": response.usage.total_tokens if hasattr(response, 'usage') else 0
+                        }
+                        st.session_state.grok_analyses.append(new_entry)
 
-                except Exception as e:
-                    st.error(f"Error analyzing {ticker}: {e}")
+                    except Exception as e:
+                        st.error(f"Error analyzing {ticker}: {e}")
 
-            # Save using proper helper function
-            save_grok_analyses(st.session_state.grok_analyses)
-            st.success("✅ Analysis saved to Supabase!")
-            st.rerun()
+                if save_grok_analyses(st.session_state.grok_analyses):
+                    st.success("✅ Analysis saved to Supabase!")
+                    st.rerun()
+                else:
+                    st.error("Failed to save analysis to Supabase. Your session is still active — try again.")
 
     # ====================== GROK SUMMARY TABLE (always show current portfolio + watchlist) ======================
     # Build latest analyses if any exist
@@ -2234,18 +2398,42 @@ See you then!
                 # --- Meeting Notes ---
                 st.markdown("**Meeting Notes / Minutes**")
                 current_notes = meeting.get("notes", "")
-                new_notes = st.text_area(
-                    "Add or edit commentary / meeting minutes",
-                    value=current_notes,
-                    key=f"meeting_notes_{idx}",
-                    height=120,
-                    placeholder="Paste meeting minutes, decisions, or discussion points here..."
+
+                uploaded_minutes = st.file_uploader(
+                    "Upload AI meeting minutes (TXT, MD, JSON, or CSV)",
+                    type=["txt", "md", "json", "csv"],
+                    key=f"minutes_upload_{idx}",
+                    help="Paste or upload exports from Otter.ai, Fireflies, Zoom AI Companion, etc.",
                 )
-                if st.button("💾 Save Notes", key=f"save_notes_{idx}"):
-                    st.session_state.finalized_meetings[idx]["notes"] = new_notes
-                    save_finalized_meetings(st.session_state.finalized_meetings)
-                    st.success("Notes saved and persisted!")
-                    st.rerun()
+                uploaded_text = ""
+                if uploaded_minutes is not None:
+                    try:
+                        uploaded_text = uploaded_minutes.getvalue().decode("utf-8", errors="replace").strip()
+                        if uploaded_text:
+                            st.caption(f"Loaded {len(uploaded_text):,} characters from {uploaded_minutes.name}")
+                    except Exception as e:
+                        st.error(f"Could not read file: {e}")
+
+                with st.form(key=f"meeting_notes_form_{idx}", clear_on_submit=False):
+                    notes_seed = current_notes
+                    if uploaded_text:
+                        header = f"\n\n--- Imported from {uploaded_minutes.name} ({datetime.now().strftime('%Y-%m-%d %H:%M')}) ---\n"
+                        notes_seed = (current_notes + header + uploaded_text).strip() if current_notes else uploaded_text
+                    new_notes = st.text_area(
+                        "Add or edit commentary / meeting minutes",
+                        value=notes_seed,
+                        height=180,
+                        placeholder="Paste meeting minutes, decisions, or discussion points here...",
+                    )
+                    submitted = st.form_submit_button("💾 Save Notes", type="primary")
+                    if submitted:
+                        st.session_state.finalized_meetings[idx]["notes"] = new_notes
+                        if save_finalized_meetings(st.session_state.finalized_meetings):
+                            st.session_state.finalized_meetings = load_finalized_meetings()
+                            st.success("Notes saved and persisted!")
+                            st.rerun()
+                        else:
+                            st.error("Failed to save notes to Supabase. You are still logged in — please try again.")
 
                 st.divider()
 
@@ -2541,10 +2729,77 @@ Current watchlist: {st.session_state.get('watchlist', [])}"""
                     except Exception as e:
                         st.error(f"AI call failed: {e}")
 
+def get_latest_analysis_run(history, run_type):
+    """Return the most recent portfolio or watchlist analysis batch."""
+    if not history:
+        return None
+    for item in history:
+        if item.get("type") == run_type and item.get("results"):
+            return item
+    if run_type == "Watchlist":
+        latest_by_ticker = {}
+        latest_time = ""
+        for item in history:
+            if item.get("type") != "Watchlist":
+                continue
+            ticker = item.get("ticker")
+            result = item.get("result")
+            if ticker and result and ticker not in latest_by_ticker:
+                latest_by_ticker[ticker] = result
+                latest_time = item.get("time", latest_time)
+        if latest_by_ticker:
+            return {
+                "type": "Watchlist",
+                "time": latest_time or "combined legacy runs",
+                "results": list(latest_by_ticker.values()),
+            }
+    return None
+
+
+def format_agent_result_row(result, include_shares=False):
+    conf = result.get("confidence", 0)
+    if conf > 1:
+        conf = conf / 100
+    row = {
+        "Ticker": result.get("ticker"),
+        "Recommended Action": result.get("recommended_action", "Hold"),
+        "Current Price": f"${result.get('current_price', 0):.2f}",
+        "Entry Price": f"${result.get('entry_price', 0):.2f}",
+        "Exit Target": f"${result.get('exit_target', 0):.2f}",
+        "Confidence": f"{conf:.0%}",
+        "RSI": result.get("rsi", "N/A"),
+        "MACD Hist": result.get("macd_hist", "N/A"),
+        "Trend": result.get("trend", "Neutral"),
+        "Reason": result.get("reason", ""),
+    }
+    if include_shares:
+        row = {
+            "Ticker": row["Ticker"],
+            "Shares Owned": round(result.get("quantity", 0), 4),
+            **{k: v for k, v in row.items() if k != "Ticker"},
+        }
+    return row
+
+
+AGENT_FIELD_DEFINITIONS = """
+| Field | Definition |
+|-------|------------|
+| **Recommended Action** | Agent decision: accumulate, hold, trim, or reduce based on trend, RSI, MACD, and your investment goals. |
+| **Current Price** | Live club price (Yahoo chart API + Finnhub fallback — same source as Tab 2 Holdings). |
+| **Entry Price** | Suggested price to add shares: near the 20-day moving average on strength, or ~3–6% below current on weakness/oversold RSI. |
+| **Exit Target** | Analyst consensus target when available; otherwise a modeled 15% upside. Short-term goals use a tighter 92% of that target. |
+| **Confidence** | 30–92% model score weighing data quality, RSI zone, trend strength, MACD momentum, and analyst upside. |
+| **RSI** | 14-period Relative Strength Index. Below 35 = oversold; above 75 = overbought; 40–65 = healthy trend zone. |
+| **MACD Hist** | MACD histogram (12/26/9). Positive = bullish momentum building; negative = bearish momentum. |
+| **Trend** | Price vs. 20/50/200-day moving averages: Strong Bullish, Bullish, Neutral, Bearish, or Strong Bearish. |
+| **Reason** | Plain-language summary tying together indicators, goal type, and the recommended action. |
+"""
+
+
 # ====================== TAB 9: EFA MULTI-AGENT TRADING SYSTEM ======================
 with tab9:
-    st.subheader("🧠 EFA Multi-Agent Trading System  •  v1.0 Beta")
-    st.caption("Goal-Aware Analysis • Real RSI + MACD • Differentiated Recommendations • Live from Yahoo Finance")
+    st.subheader("🧠 EFA Multi-Agent Trading System  •  v1.1")
+    st.caption("Goal-Aware Analysis • Live club prices • Real RSI + MACD from daily history • Latest run shown below")
 
     import sys
     import os
@@ -2608,12 +2863,10 @@ with tab9:
                     results = []
                     for ticker in portfolio_holdings:
                         try:
-                            # Pass live price + goals so the agents have good data even if their internal fetch is flaky
-                            live_price = get_price(ticker)
-                            context = {
-                                "goals": st.session_state.get("investment_goals", {}).get(ticker, {}),
-                                "live_price": live_price if live_price > 0 else None
-                            }
+                            context = build_agent_context(
+                                ticker,
+                                st.session_state.get("investment_goals", {}).get(ticker, {}),
+                            )
                             result = st.session_state.orchestrator.run_cycle(ticker, context)
                             result["quantity"] = portfolio_quantities.get(ticker, 0)
                             results.append(result)
@@ -2621,12 +2874,14 @@ with tab9:
                             st.error(f"Error on {ticker}: {e}")
                     
                     st.session_state.analysis_history.insert(0, {
-                        "type": "Portfolio", 
-                        "results": results, 
-                        "time": datetime.now().strftime("%H:%M")
+                        "type": "Portfolio",
+                        "results": results,
+                        "time": datetime.now().strftime("%Y-%m-%d %H:%M"),
                     })
-                    save_analysis_history(st.session_state.analysis_history)
-                    st.success("✅ Portfolio Analysis Complete!")
+                    if save_analysis_history(st.session_state.analysis_history):
+                        st.success("✅ Portfolio Analysis Complete!")
+                    else:
+                        st.warning("Analysis ran but failed to persist to Supabase. Results shown for this session.")
 
     with col2:
         if st.button("🔄 Refresh Price Cache (used by Holdings)", type="secondary"):
@@ -2649,40 +2904,15 @@ with tab9:
                         print(f"Price warm-up failed for {t}: {e}")
                 st.success(f"✅ Cleared Streamlit cache + warmed prices for {warmed}/{len(all_tickers)} tickers. Check Tab 2.")
 
-    # Display Portfolio Table
-    for item in st.session_state.analysis_history:
-        if item.get("type") == "Portfolio" and "results" in item:
-            with st.expander(f"📊 Portfolio — {item['time']}", expanded=True):
-                data = [{
-                    "Ticker": r.get("ticker"),
-                    "Shares Owned": round(r.get("quantity", 0), 4),
-                    "Recommended Action": r.get("recommended_action", "Hold"),
-                    "Current Price": f"${r.get('current_price',0):.2f}",
-                    "Entry Price": f"${r.get('entry_price',0):.2f}",
-                    "Exit Target": f"${r.get('exit_target',0):.2f}",
-                    "Confidence": f"{r.get('confidence',0):.0%}",
-                    "RSI": r.get("rsi", "N/A"),
-                    "MACD Hist": r.get("macd_hist", "N/A"),
-                    "Trend": r.get("trend","neutral").title(),
-                    "Reason": r.get("reason","")
-                } for r in item["results"]]
-                
-                df = pd.DataFrame(data)
-                st.dataframe(df, width="stretch", hide_index=True)
-
-                with st.expander("🔍 Agent Trace (raw data)", expanded=False):
-                    for r in item["results"]:
-                        st.markdown(f"**{r['ticker']}**")
-                        st.json({
-                            "current_price": r.get("current_price"),
-                            "rsi": r.get("rsi"),
-                            "macd_hist": r.get("macd_hist"),
-                            "trend": r.get("trend"),
-                            "confidence": r.get("confidence"),
-                            "entry_price": r.get("entry_price"),
-                            "exit_target": r.get("exit_target"),
-                            "recommended_action": r.get("recommended_action")
-                        })
+    latest_portfolio = get_latest_analysis_run(st.session_state.analysis_history, "Portfolio")
+    if latest_portfolio and latest_portfolio.get("results"):
+        st.markdown(f"#### Latest Portfolio Analysis — {latest_portfolio.get('time', 'N/A')}")
+        portfolio_rows = [
+            format_agent_result_row(r, include_shares=True) for r in latest_portfolio["results"]
+        ]
+        st.dataframe(pd.DataFrame(portfolio_rows), width="stretch", hide_index=True)
+    else:
+        st.info("No portfolio analysis yet. Click **Analyze Full Portfolio** above.")
 
     # ====================== WATCHLIST ANALYSIS ======================
     st.markdown("### ⭐ Watchlist Goal-Aware Analysis")
@@ -2698,36 +2928,38 @@ with tab9:
             st.error("Orchestrator not initialized. Please re-initialize above.")
         else:
             with st.spinner("Analyzing watchlist..."):
+                watchlist_results = []
                 for ticker in selected:
                     try:
-                        context = {"goals": st.session_state.get("investment_goals", {}).get(ticker, {})}
+                        context = build_agent_context(
+                            ticker,
+                            st.session_state.get("investment_goals", {}).get(ticker, {}),
+                        )
                         result = st.session_state.orchestrator.run_cycle(ticker, context)
-                        st.session_state.analysis_history.insert(0, {
-                            "type": "Watchlist", 
-                            "ticker": ticker, 
-                            "result": result, 
-                            "time": datetime.now().strftime("%H:%M")
-                        })
+                        watchlist_results.append(result)
                     except Exception as e:
                         st.error(f"Error on {ticker}: {e}")
-                
-                save_analysis_history(st.session_state.analysis_history)
-                st.success("✅ Watchlist Analysis Complete!")
 
-    watchlist_items = [item for item in st.session_state.analysis_history if item.get("type") == "Watchlist"]
-    if watchlist_items:
-        watch_data = [{
-            "Ticker": item["ticker"],
-            "Recommended Action": item["result"].get("recommended_action", "Hold"),
-            "Current Price": f"${item['result'].get('current_price',0):.2f}",
-            "Entry Price": f"${item['result'].get('entry_price',0):.2f}",
-            "Exit Target": f"${item['result'].get('exit_target',0):.2f}",
-            "Confidence": f"{item['result'].get('confidence',0):.0%}",
-            "RSI": item["result"].get("rsi", "N/A"),
-            "MACD Hist": item["result"].get("macd_hist", "N/A"),
-            "Reason": item["result"].get("reason","")[:110]
-        } for item in watchlist_items]
-        
-        st.dataframe(pd.DataFrame(watch_data), width="stretch", hide_index=True)
+                if watchlist_results:
+                    st.session_state.analysis_history.insert(0, {
+                        "type": "Watchlist",
+                        "results": watchlist_results,
+                        "time": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                    })
+                    if save_analysis_history(st.session_state.analysis_history):
+                        st.success("✅ Watchlist Analysis Complete!")
+                    else:
+                        st.warning("Analysis ran but failed to persist to Supabase. Results shown for this session.")
 
-    st.caption("v1.0 Beta • Results now persist in Supabase for all members • Real prices + real indicators from Yahoo Finance")
+    latest_watchlist = get_latest_analysis_run(st.session_state.analysis_history, "Watchlist")
+    if latest_watchlist and latest_watchlist.get("results"):
+        st.markdown(f"#### Latest Watchlist Analysis — {latest_watchlist.get('time', 'N/A')}")
+        watch_rows = [format_agent_result_row(r) for r in latest_watchlist["results"]]
+        st.dataframe(pd.DataFrame(watch_rows), width="stretch", hide_index=True)
+    else:
+        st.info("No watchlist analysis yet. Click **Run Watchlist Review** above.")
+
+    with st.expander("📖 Field Definitions", expanded=False):
+        st.markdown(AGENT_FIELD_DEFINITIONS)
+
+    st.caption("v1.1 • Latest analysis only shown (history kept in Supabase) • Live prices + daily-history indicators")
