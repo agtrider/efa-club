@@ -55,6 +55,9 @@ def test_syntax():
     files = [
         ROOT / "efa_club_app.py",
         ROOT / "efa_club_services.py",
+        ROOT / "efa_club_persistence.py",
+        ROOT / "efa_club_auth.py",
+        ROOT / "efa_club_meetings.py",
         ROOT / "efa-trading-agent" / "agents" / "research.py",
         ROOT / "efa-trading-agent" / "agents" / "orchestrator.py",
     ]
@@ -217,8 +220,19 @@ def test_yahoo_chart_fallback():
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
+def test_module_imports():
+    import efa_club_persistence
+    import efa_club_auth
+    import efa_club_meetings
+    from efa_club_auth import verify_password, is_admin
+    assert verify_password("Chris Koo", "EFAIC2026002KC")
+    assert not is_admin("Chris Koo")
+    return TestResult("module_imports").ok("persistence, auth, meetings modules OK")
+
+
 ALL_TESTS = [
     test_syntax,
+    test_module_imports,
     test_requirements_imports,
     test_local_data_files,
     test_safe_float_edge_cases,
@@ -259,6 +273,7 @@ def main():
         print_recommendations(failed)
         return 1
     print("\nAll checks passed. Safe to deploy.")
+    print("Also run: pytest tests/ -v --ignore=tests/test_ui_playwright.py")
     return 0
 
 

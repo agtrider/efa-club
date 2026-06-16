@@ -9,15 +9,63 @@ from pathlib import Path
 import os
 import pytz
 import requests
-import secrets
-import base64
-
+from efa_club_auth import (
+    MEMBER_CREDENTIALS,
+    SESSION_TTL_DAYS,
+    create_member_session,
+    is_admin,
+    resolve_session_user,
+    revoke_member_session,
+    verify_password,
+)
+from efa_club_meetings import (
+    MAX_MEETING_ATTACHMENT_BYTES,
+    add_meeting_attachment,
+    get_attachment_download,
+    log_site_access,
+)
+from efa_club_persistence import (
+    clear_price_cache,
+    get_last_supabase_error,
+    load_access_log,
+    load_analysis_history,
+    load_availability_responses,
+    load_comments,
+    load_finalized_meetings,
+    load_from_supabase,
+    load_grok_analyses,
+    load_investment_goals,
+    load_json,
+    load_last_prices,
+    load_member_sessions,
+    load_members as _load_members_raw,
+    load_polls,
+    load_transactions,
+    load_watchlist,
+    purge_invalid_price_cache,
+    save_analysis_history,
+    save_availability_responses,
+    save_comments,
+    save_finalized_meetings,
+    save_grok_analyses,
+    save_investment_goals,
+    save_json,
+    save_last_prices,
+    save_member_sessions,
+    save_members,
+    save_polls,
+    save_to_supabase,
+    save_transactions,
+    save_watchlist,
+    supabase,
+)
 from efa_club_services import (
     build_fundamentals_row,
     can_edit_note,
     fetch_ticker_info,
     fundamentals_row_is_healthy,
     normalize_meeting_record,
+    normalize_availability_responses,
 )
 
 # ====================== PAGE CONFIG ======================
@@ -28,15 +76,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# ====================== SUPABASE CONFIG ======================
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
-
-try:
-    from supabase import create_client, Client
-    supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
-except Exception:
-    supabase = None
+# ====================== SUPABASE CONFIG (see efa_club_persistence) ======================
 
 # ====================== SUPABASE CONNECTION TEST (Detailed) ======================
 if supabase:
@@ -68,50 +108,7 @@ try:
 except Exception:
     FINNHUB_CLIENT = None
 
-# ====================== SUPABASE PERSISTENCE HELPERS ======================
-def load_from_supabase(key, default=None):
-    if supabase is None:
-        return default
-    try:
-        response = supabase.table("club_data").select("data").eq("id", 1).execute()
-        if response.data and len(response.data) > 0:
-            return response.data[0].get("data", {}).get(key, default)
-        return default
-    except Exception as e:
-        print(f"Supabase load error for {key}: {e}")
-        return default
-
-_LAST_SUPABASE_ERROR = ""
-
-def get_last_supabase_error():
-    return _LAST_SUPABASE_ERROR
-
-def save_to_supabase(key, value):
-    global _LAST_SUPABASE_ERROR
-    if supabase is None:
-        _LAST_SUPABASE_ERROR = "Supabase not connected (check SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY on Render)."
-        return False
-    _LAST_SUPABASE_ERROR = ""
-    for attempt in range(3):
-        try:
-            current = supabase.table("club_data").select("data").eq("id", 1).execute()
-            if not current.data:
-                _LAST_SUPABASE_ERROR = "club_data table row missing (id=1). Run the Supabase schema setup."
-                return False
-            data_dict = current.data[0].get("data", {}) or {}
-            if not isinstance(data_dict, dict):
-                data_dict = {}
-            data_dict[key] = value
-            supabase.table("club_data").upsert({"id": 1, "data": data_dict}).execute()
-            return True
-        except Exception as e:
-            _LAST_SUPABASE_ERROR = str(e)
-            print(f"Supabase save error for {key} (attempt {attempt + 1}): {e}")
-    return False
-
-# ====================== PERSISTENT LOGIN SESSIONS ======================
-SESSION_TTL_DAYS = 30
-
+# ====================== STREAMLIT AUTH BRIDGE (logic in efa_club_auth) ======================
 def _query_param(name):
     try:
         val = st.query_params.get(name)
@@ -137,80 +134,21 @@ def _clear_query_param(name):
         except Exception:
             pass
 
-def load_member_sessions():
-    return load_from_supabase("member_sessions", {})
-
-def save_member_sessions(sessions):
-    return save_to_supabase("member_sessions", sessions)
-
-def create_member_session(username):
-    session_id = secrets.token_urlsafe(32)
-    sessions = load_member_sessions()
-    sessions[session_id] = {
-        "username": username,
-        "created": datetime.now().isoformat(),
-        "expires": (datetime.now() + timedelta(days=SESSION_TTL_DAYS)).isoformat(),
-    }
-    expired = [
-        sid for sid, meta in sessions.items()
-        if datetime.fromisoformat(meta.get("expires", "2000-01-01")) < datetime.now()
-    ]
-    for sid in expired:
-        sessions.pop(sid, None)
-    save_member_sessions(sessions)
-    return session_id
-
-def revoke_member_session(session_id):
-    if not session_id:
-        return
-    sessions = load_member_sessions()
-    if session_id in sessions:
-        sessions.pop(session_id, None)
-        save_member_sessions(sessions)
-
 def restore_login_from_session():
     if st.session_state.get("logged_in"):
         return True
     session_id = _query_param("sid")
-    if not session_id:
-        return False
-    sessions = load_member_sessions()
-    meta = sessions.get(session_id)
-    if not meta:
-        return False
-    try:
-        if datetime.fromisoformat(meta.get("expires", "2000-01-01")) < datetime.now():
-            revoke_member_session(session_id)
-            return False
-    except Exception:
-        return False
-    username = meta.get("username")
-    if username not in MEMBER_CREDENTIALS:
+    username = resolve_session_user(session_id)
+    if not username:
         return False
     st.session_state.logged_in = True
     st.session_state.username = username
-    st.session_state.is_admin = (username == "Antonio Calderon")
+    st.session_state.is_admin = is_admin(username)
     st.session_state.auth_session_id = session_id
     return True
 
-# ====================== ALL DATA FUNCTIONS (Supabase) ======================
 def load_members():
-    return load_from_supabase("members", [{"name": name, "total_contributed": 0.0} for name in MEMBER_CREDENTIALS.keys()])
-
-def save_members(members_list):
-    save_to_supabase("members", members_list)
-
-def load_transactions():
-    return load_from_supabase("transactions", [])
-
-def save_transactions(transactions_list):
-    save_to_supabase("transactions", transactions_list)
-
-def load_comments():
-    return load_from_supabase("comments", [])
-
-def save_comments(comments_list):
-    save_to_supabase("comments", comments_list)
+    return _load_members_raw(list(MEMBER_CREDENTIALS.keys()))
 
 def post_deploy_comment_once(marker, text):
     """Post a one-time deployment notice to the Comments tab (Supabase)."""
@@ -229,223 +167,6 @@ def post_deploy_comment_once(marker, text):
         save_comments(comments)
     except Exception as e:
         print(f"[deploy comment] Error: {e}")
-
-def load_watchlist():
-    return load_from_supabase("watchlist", [])
-
-def save_watchlist(watchlist):
-    save_to_supabase("watchlist", watchlist)
-
-def load_investment_goals():
-    return load_from_supabase("investment_goals", {})
-
-def save_investment_goals(goals):
-    save_to_supabase("investment_goals", goals)
-
-def load_analysis_history():
-    return load_from_supabase("analysis_history", [])
-
-def save_analysis_history(history):
-    save_to_supabase("analysis_history", history)
-
-def load_polls():
-    return load_from_supabase("polls", [])
-
-def save_polls(polls_list):
-    save_to_supabase("polls", polls_list)
-
-def load_availability_responses():
-    return load_from_supabase("availability_responses", {})
-
-def save_availability_responses(responses_dict):
-    save_to_supabase("availability_responses", responses_dict)
-
-def normalize_availability_responses(responses, proposals):
-    """Migrate old flat {username: [slots]} format to per-poll {poll_key: {username: [slots]}}.
-
-    Smart attach: prefer the poll whose week dates appear in the legacy slot strings.
-    Falls back to the oldest poll (proposals[0]). This ensures:
-    - Existing proposals keep their historical availability data.
-    - Any newly created polls (even if created right after deploy before migration runs) start at zero.
-    """
-    if not responses or not isinstance(responses, dict):
-        return {}
-    sample = next(iter(responses.values()), None)
-    if isinstance(sample, (list, tuple)):
-        # Old flat format detected. Collect all legacy slot strings.
-        legacy_slots = []
-        for lst in responses.values():
-            if isinstance(lst, (list, tuple)):
-                legacy_slots.extend(lst)
-        legacy_text = " ".join(str(s) for s in legacy_slots)
-
-        target_key = None
-        if proposals:
-            # 1. Try to find a poll whose week_start or week_end appears in the legacy slots.
-            for poll in proposals:
-                ws = poll.get("week_start", "")
-                we = poll.get("week_end", "")
-                if (ws and ws in legacy_text) or (we and we in legacy_text):
-                    target_key = str(poll.get("id", proposals.index(poll) + 1))
-                    break
-            # 2. Fallback: attach legacy data to the oldest poll so previous proposals keep their data.
-            if target_key is None:
-                first_poll = proposals[0]
-                target_key = str(first_poll.get("id", 1))
-            # Build the migrated dict with legacy under the chosen key only.
-            # Newer polls (higher ids) will not receive it → they start at zero responses.
-            return {target_key: responses}
-        return {}
-    return responses
-
-def load_finalized_meetings():
-    meetings = load_from_supabase("finalized_meetings", [])
-    return [normalize_meeting_record(m) for m in (meetings or [])]
-
-def save_finalized_meetings(meetings):
-    cleaned = [normalize_meeting_record(m) for m in meetings]
-    save_json("finalized_meetings.json", cleaned)
-    return save_to_supabase("finalized_meetings", cleaned)
-
-def load_meeting_attachment_store():
-    return load_from_supabase("meeting_attachment_store", {})
-
-def save_meeting_attachment_store(store):
-    return save_to_supabase("meeting_attachment_store", store)
-
-def load_access_log():
-    return load_from_supabase("access_log", [])
-
-def save_access_log(entries):
-    return save_to_supabase("access_log", entries)
-
-def log_site_access(username, action="visit"):
-    if not username:
-        return
-    try:
-        entries = load_access_log() or []
-        entries.insert(0, {
-            "username": username,
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "action": action,
-        })
-        save_access_log(entries[:500])
-    except Exception as e:
-        print(f"[access_log] {e}")
-
-MAX_MEETING_ATTACHMENT_BYTES = 3 * 1024 * 1024
-
-def add_meeting_attachment(meeting, uploaded_file, username):
-    """Store file in separate Supabase key; meeting keeps only a download reference."""
-    if uploaded_file is None:
-        return False, "No file selected."
-    raw = uploaded_file.getvalue()
-    if len(raw) > MAX_MEETING_ATTACHMENT_BYTES:
-        return False, f"File too large ({len(raw) // 1024} KB). Max is {MAX_MEETING_ATTACHMENT_BYTES // 1024} KB."
-    meeting_id = meeting.get("id")
-    if not meeting_id:
-        return False, "Meeting is missing an id."
-    store = load_meeting_attachment_store() or {}
-    att_id = len(meeting.get("attachments", [])) + 1
-    file_key = f"m{meeting_id}_a{att_id}"
-    store[file_key] = {
-        "meeting_id": meeting_id,
-        "filename": uploaded_file.name,
-        "uploaded_by": username,
-        "uploaded_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
-        "mime_type": uploaded_file.type or "application/octet-stream",
-        "size": len(raw),
-        "content_b64": base64.b64encode(raw).decode("ascii"),
-    }
-    if not save_meeting_attachment_store(store):
-        return False, get_last_supabase_error() or "Failed to save attachment."
-    meeting.setdefault("attachments", []).append({
-        "id": att_id,
-        "file_key": file_key,
-        "filename": uploaded_file.name,
-        "uploaded_by": username,
-        "uploaded_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
-        "size": len(raw),
-    })
-    return True, ""
-
-def get_attachment_download(file_key):
-    store = load_meeting_attachment_store() or {}
-    entry = store.get(file_key)
-    if not entry:
-        return None, None, None
-    try:
-        data = base64.b64decode(entry["content_b64"])
-        return data, entry.get("filename", "download"), entry.get("mime_type", "application/octet-stream")
-    except Exception:
-        return None, None, None
-
-def load_grok_analyses():
-    return load_from_supabase("grok_analyses", [])
-
-def save_grok_analyses(analyses):
-    save_to_supabase("grok_analyses", analyses)
-
-# ====================== LOCAL JSON HELPERS + SUPABASE SYNC FOR PRICE CACHE ======================
-DATA_DIR = Path("local_data")
-DATA_DIR.mkdir(exist_ok=True)
-
-def load_json(filename, default=None):
-    try:
-        if (DATA_DIR / filename).exists():
-            with open(DATA_DIR / filename, 'r', encoding='utf-8') as f:
-                return json.load(f)
-    except:
-        pass
-    return default or [] if isinstance(default, list) else (default or {})
-
-def save_json(filename, data):
-    try:
-        with open(DATA_DIR / filename, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
-        return True
-    except Exception as e:
-        st.error(f"Failed to save {filename}: {e}")
-        return False
-
-def load_last_prices():
-    """Load last known good prices. Tries Supabase first (shared), falls back to local JSON."""
-    # Try Supabase shared cache
-    supa_prices = load_from_supabase("last_prices", None)
-    if supa_prices and isinstance(supa_prices, dict) and len(supa_prices) > 0:
-        return supa_prices
-    # Fallback to local file (works offline / first run)
-    return load_json("last_prices.json", {})
-
-def save_last_prices(prices_dict):
-    """Save to BOTH local JSON (fast) and Supabase (shared across all members/sessions)."""
-    save_json("last_prices.json", prices_dict)
-    # Also persist to Supabase so new team members / cloud deploys see recent prices immediately
-    try:
-        save_to_supabase("last_prices", prices_dict)
-    except Exception:
-        pass  # Non-fatal; local copy is still good
-
-def clear_price_cache(tickers=None):
-    """Drop cached quotes so the next fetch must pull fresh data (used by Force Refresh)."""
-    last_prices = load_last_prices()
-    if tickers:
-        for t in tickers:
-            last_prices.pop(str(t).upper().strip(), None)
-    else:
-        last_prices = {}
-    save_last_prices(last_prices)
-
-def purge_invalid_price_cache():
-    """Remove poisoned cache entries (e.g. csv_fill purchase prices saved as market quotes)."""
-    last_prices = load_last_prices()
-    dirty = [k for k, v in last_prices.items() if str(v.get("source", "")).lower() == "csv_fill"]
-    if not dirty:
-        return
-    for k in dirty:
-        last_prices.pop(k, None)
-    save_last_prices(last_prices)
-    print(f"[price cache] purged invalid csv_fill entries: {dirty}")
 
 def _yf_history(stock, **kwargs):
     """yfinance 1.x removed progress= — strip it so history calls don't fail silently on Render."""
@@ -706,20 +427,6 @@ if "logged_in" not in st.session_state:
 if "auth_session_id" not in st.session_state:
     st.session_state.auth_session_id = None
 
-MEMBER_CREDENTIALS = {
-    "Antonio Calderon": {"email": "acal721@gmail.com", "password": "EFAIC2026001CA"},
-    "Chris Koo": {"email": "Chris.b.koo@outlook.com", "password": "EFAIC2026002KC"},
-    "Josh Tafoya": {"email": "Joshtafoya01@gmail.com", "password": "EFAIC2026003TJ"},
-    "Jeff Gragert": {"email": "Jagragert@gmail.com", "password": "EFAIC2026004GJ"},
-    "Nick Vigil": {"email": "Nbvigil24@hotmail.com", "password": "EFAIC2026005VN"},
-    "Ray Gilkes": {"email": "Bison1867@gmail.com", "password": "EFAIC2026006GR"},
-    "Jose Calderon": {"email": "Josecalderon036@gmail.com", "password": "EFAIC2026007CJ"},
-    "Chad Speegle": {"email": "Chad.speegle@gmail.com", "password": "EFAIC2026008SC"},
-    "Jadyn Tafoya": {"email": "Jadynty21@gmail.com", "password": "EFAIC2026009TJ"},
-    "Matt Newbill": {"email": "Matthew.Newbill@gmail.com", "password": "EFAIC20260010NM"},
-    "Mike Brooks": {"email": "Mikeb1120@gmail.com", "password": "EFAIC20260011BM"}
-}
-
 def login_page():
     st.title("🔥 EFA Investment Club")
     st.subheader("Member Login")
@@ -727,11 +434,11 @@ def login_page():
     email_input = st.text_input("Email (Login ID)", value=MEMBER_CREDENTIALS[username]["email"], disabled=True)
     password = st.text_input("Password", type="password")
     if st.button("Login", type="primary"):
-        if password == MEMBER_CREDENTIALS[username]["password"]:
+        if verify_password(username, password):
             session_id = create_member_session(username)
             st.session_state.logged_in = True
             st.session_state.username = username
-            st.session_state.is_admin = (username == "Antonio Calderon")
+            st.session_state.is_admin = is_admin(username)
             st.session_state.auth_session_id = session_id
             _set_query_param("sid", session_id)
             st.success(f"✅ Welcome back, {username}!")

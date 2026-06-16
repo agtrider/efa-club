@@ -169,3 +169,30 @@ def can_edit_note(note, username, is_admin):
     if is_admin:
         return True
     return note.get("author") == username
+
+
+def normalize_availability_responses(responses, proposals):
+    """Migrate old flat {username: [slots]} format to per-poll structure."""
+    if not responses or not isinstance(responses, dict):
+        return {}
+    sample = next(iter(responses.values()), None)
+    if isinstance(sample, (list, tuple)):
+        legacy_slots = []
+        for lst in responses.values():
+            if isinstance(lst, (list, tuple)):
+                legacy_slots.extend(lst)
+        legacy_text = " ".join(str(s) for s in legacy_slots)
+        target_key = None
+        if proposals:
+            for poll in proposals:
+                ws = poll.get("week_start", "")
+                we = poll.get("week_end", "")
+                if (ws and ws in legacy_text) or (we and we in legacy_text):
+                    target_key = str(poll.get("id", proposals.index(poll) + 1))
+                    break
+            if target_key is None:
+                first_poll = proposals[0]
+                target_key = str(first_poll.get("id", 1))
+            return {target_key: responses}
+        return {}
+    return responses

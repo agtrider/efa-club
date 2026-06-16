@@ -1,0 +1,50 @@
+name: EFA Club CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Run site test agent (regression suite)
+        run: python tests/site_test_agent.py
+
+      - name: Run pytest unit tests
+        run: pytest tests/ -v --ignore=tests/test_ui_playwright.py
+
+  ui-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pytest playwright
+          playwright install chromium
+
+      - name: Run Playwright UI smoke tests
+        run: pytest tests/test_ui_playwright.py -v
+        env:
+          EFA_TEST_PASSWORD: "EFAIC2026002KC"

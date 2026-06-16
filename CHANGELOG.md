@@ -1,5 +1,29 @@
 # EFA Investment Club — Changelog
 
+## 2026-06-16 (d) — CI, test suite, module split
+
+**Files added:** `.github/workflows/ci.yml`, `efa_club_persistence.py`, `efa_club_auth.py`, `efa_club_meetings.py`, `tests/test_auth.py`, `tests/test_supabase_persistence.py`, `tests/test_ui_playwright.py`, `requirements-dev.txt`, `pytest.ini`
+
+### Infrastructure
+- **GitHub Actions CI** on every push/PR to `main`: site test agent + pytest unit tests + Playwright UI smoke (Ubuntu).
+- **Module split** from monolithic `efa_club_app.py`:
+  - `efa_club_persistence.py` — Supabase + local JSON
+  - `efa_club_auth.py` — credentials + session tokens
+  - `efa_club_meetings.py` — attachments + access log
+  - `efa_club_services.py` — fundamentals + meeting helpers
+- **Supabase mock tests** — read-modify-write, disconnect handling, local JSON fallback.
+- **Playwright UI tests** — login, Tab 6 fundamentals, scheduler tab.
+
+### Run tests locally
+```bash
+python tests/site_test_agent.py          # 10/10 regression checks
+pytest tests/ -v --ignore=tests/test_ui_playwright.py   # unit tests
+pip install -r requirements-dev.txt && playwright install chromium
+pytest tests/test_ui_playwright.py -v    # UI smoke (needs Streamlit)
+```
+
+---
+
 ## 2026-06-16 (c) — Tab 6 regression fix + site test agent
 
 **Files changed:** `efa_club_services.py` (new), `efa_club_app.py`, `tests/site_test_agent.py` (new)
