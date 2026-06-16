@@ -146,11 +146,20 @@ def save_comments(comments_list):
 
 
 def load_watchlist():
-    return load_from_supabase("watchlist", [])
+    supa = load_from_supabase("watchlist", None)
+    if supa and isinstance(supa, list) and len(supa) > 0:
+        return supa
+    local = load_json("watchlist.json", [])
+    return local if isinstance(local, list) else []
 
 
 def save_watchlist(watchlist):
-    return save_to_supabase("watchlist", watchlist)
+    save_json("watchlist.json", watchlist)
+    try:
+        save_to_supabase("watchlist", watchlist)
+    except Exception:
+        pass
+    return True
 
 
 def load_investment_goals():

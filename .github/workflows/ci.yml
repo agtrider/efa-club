@@ -20,10 +20,15 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
-          pip install pytest
+          pip install -r requirements-dev.txt
+
+      - name: Seed CI fixtures
+        run: python -c "from tests.ci_fixtures import seed_ci_fixtures; seed_ci_fixtures()"
 
       - name: Run site test agent (regression suite)
         run: python tests/site_test_agent.py
+        env:
+          GITHUB_ACTIONS: "true"
 
       - name: Run pytest unit tests
         run: pytest tests/ -v --ignore=tests/test_ui_playwright.py
@@ -41,10 +46,14 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
-          pip install pytest playwright
-          playwright install chromium
+          pip install -r requirements-dev.txt
+          playwright install --with-deps chromium
+
+      - name: Seed CI fixtures
+        run: python -c "from tests.ci_fixtures import seed_ci_fixtures; seed_ci_fixtures()"
 
       - name: Run Playwright UI smoke tests
         run: pytest tests/test_ui_playwright.py -v
         env:
+          GITHUB_ACTIONS: "true"
           EFA_TEST_PASSWORD: "EFAIC2026002KC"

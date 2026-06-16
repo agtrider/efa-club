@@ -58,6 +58,15 @@ def test_save_to_supabase_missing_row():
         assert "missing" in persist.get_last_supabase_error().lower()
 
 
+def test_load_watchlist_falls_back_to_local_json(tmp_path, monkeypatch):
+    monkeypatch.setattr(persist, "DATA_DIR", tmp_path)
+    with patch.object(persist, "supabase", None):
+        assert persist.load_watchlist() == []
+    (tmp_path / "watchlist.json").write_text('["FSLR", "ENPH"]', encoding="utf-8")
+    with patch.object(persist, "supabase", None):
+        assert persist.load_watchlist() == ["FSLR", "ENPH"]
+
+
 def test_save_finalized_meetings_writes_local_json(tmp_path, monkeypatch):
     monkeypatch.setattr(persist, "DATA_DIR", tmp_path)
     monkeypatch.setattr(persist, "save_to_supabase", lambda k, v: True)

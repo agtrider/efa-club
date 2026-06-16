@@ -1,5 +1,13 @@
 # EFA Investment Club — Changelog
 
+## 2026-06-16 (h) — CI fix (test + ui-smoke jobs)
+
+**Root cause:** `local_data/` gitignored → site test agent failed on missing watchlist; live yfinance/Finnhub calls flaky on GitHub Actions; Playwright used brittle Streamlit selectors and empty watchlist (no Tab 6 table).
+
+**Fix:** Committed `tests/fixtures/watchlist.json` + `seed_ci_fixtures()`; CI skips live network tests; watchlist loads from local JSON when Supabase offline; Playwright uses role/tab selectors + 90s startup timeout + `playwright install --with-deps`.
+
+---
+
 ## 2026-06-16 (g) — Tab 6 extended fundamentals (target, cash, FCF, EBIT)
 
 **Root cause:** Finnhub `company_basic_financials` does not expose `totalCash` / `freeCashFlow` / analyst count under the keys we used; `price_target` is often empty on free tier. Render's partial yfinance `.info` also skips those fields.
