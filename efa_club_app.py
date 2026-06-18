@@ -22,7 +22,15 @@ from efa_club_meetings import (
     MAX_MEETING_ATTACHMENT_BYTES,
     get_attachment_download,
     log_site_access,
+    persist_add_meeting_note,
+    persist_analysis_batch,
+    persist_cancel_meeting,
+    persist_create_meeting,
+    persist_create_poll,
+    persist_delete_meeting_note,
     persist_meeting_attachment,
+    persist_member_availability,
+    persist_update_meeting_note,
 )
 from efa_club_persistence import (
     clear_price_cache,
@@ -43,17 +51,14 @@ from efa_club_persistence import (
     load_transactions,
     load_watchlist,
     purge_invalid_price_cache,
-    save_analysis_history,
     save_availability_responses,
     save_comments,
-    save_finalized_meetings,
     save_grok_analyses,
     save_investment_goals,
     save_json,
     save_last_prices,
     save_member_sessions,
     save_members,
-    save_polls,
     save_to_supabase,
     save_transactions,
     save_watchlist,
@@ -1187,8 +1192,6 @@ for m in data["members"]:
     name = m["name"]
     m["total_invested"] = dynamic_totals.get(name, {}).get("invested", 0.0)
     m["fees"] = dynamic_totals.get(name, {}).get("fees", 0.0)
-    m["total_contributed"] = dynamic_totals.get(name, {}).get("contributed", m.get("total_contributed", 0.0))
-save_members(data["members"])
 
 # ====================== MARKET STATUS (for price strategy + UI badges) ======================
 try:
@@ -1246,8 +1249,12 @@ if negative_members:
     st.error(f"⚠️ **NEGATIVE BALANCE ALERT**: {', '.join(negative_members)} have gone negative.")
 
 # ====================== SIDEBAR ======================
-st.sidebar.header("📤 CSV Upload (IBKR)")
-uploaded_file = st.sidebar.file_uploader("Upload new IBKR Transactions CSV", type=["csv"], key="csv_uploader")
+if st.session_state.is_admin:
+    st.sidebar.header("📤 CSV Upload (IBKR)")
+    uploaded_file = st.sidebar.file_uploader("Upload new IBKR Transactions CSV", type=["csv"], key="csv_uploader")
+else:
+    uploaded_file = None
+
 if uploaded_file is not None:
     try:
         text = uploaded_file.getvalue().decode('utf-8')
@@ -1266,7 +1273,7 @@ if uploaded_file is not None:
     except Exception as e:
         st.sidebar.error(f"Error reading CSV: {e}")
 
-if "pending_df" in st.session_state:
+if st.session_state.is_admin and "pending_df" in st.session_state:
     col1, col2 = st.sidebar.columns(2)
     if col1.button("Append to Existing Data", key="append_btn"):
         new_txns = []
@@ -1283,7 +1290,9 @@ if "pending_df" in st.session_state:
                 "allocations": {}
             })
         data["transactions"].extend(new_txns)
-        save_transactions(data["transactions"])
+        if not save_transactions(data["transactions"]):
+            st.sidebar.error(f"Save failed: {get_last_supabase_error()}")
+            st.stop()
         st.sidebar.success(f"✅ Appended {len(new_txns)} transactions. Running allocation...")
         auto_allocate_transactions()
         data["transactions"] = load_transactions()
@@ -1306,7 +1315,9 @@ if "pending_df" in st.session_state:
             })
         # Clear everything and only keep the new transactions (no seed protection for testing)
         data["transactions"] = new_txns
-        save_transactions(data["transactions"])
+        if not save_transactions(data["transactions"]):
+            st.sidebar.error(f"Save failed: {get_last_supabase_error()}")
+            st.stop()
         st.sidebar.success(f"✅ Replaced with {len(new_txns)} transactions. Running allocation...")
         auto_allocate_transactions()
         data["transactions"] = load_transactions()
@@ -1314,11 +1325,11 @@ if "pending_df" in st.session_state:
         del st.session_state.pending_df
         st.rerun()
 
-if st.sidebar.button("🔄 Refresh Data from Local Storage", key="refresh_btn"):
+if st.session_state.is_admin and st.sidebar.button("🔄 Refresh Data from Supabase", key="refresh_btn"):
     data["members"] = load_members()
     data["transactions"] = load_transactions()
     auto_allocate_transactions()
-    st.success("✅ Data refreshed from local storage")
+    st.success("✅ Data refreshed from Supabase")
     st.rerun()
 
 if st.sidebar.button("Logout", key="logout_btn"):
@@ -1377,24 +1388,30 @@ with tab1:
         "fees": round(df_display["fees"].sum(), 2)
     }
     df_with_total = pd.concat([df_display, pd.DataFrame([total_data])], ignore_index=True)
-    edited_df = st.data_editor(
-        df_with_total,
-        column_config={
-            "name": st.column_config.TextColumn("Member", disabled=True),
-            "total_contributed": st.column_config.NumberColumn("Total Contributed $", format="$%.2f"),
-            "current_balance": st.column_config.NumberColumn("Current Cash Balance $", format="$%.2f", disabled=True),
-            "total_invested": st.column_config.NumberColumn("Total Invested $", format="$%.2f", disabled=True),
-            "fees": st.column_config.NumberColumn("Fees $", format="$%.2f")
-        },
-        width="stretch",
-        hide_index=True
-    )
-    if not edited_df.iloc[:-1].equals(df_display):
-        for i, row in edited_df.iloc[:-1].iterrows():
-            data["members"][i]["total_contributed"] = float(row["total_contributed"])
-        save_members(data["members"])
-        st.success("✅ Balances updated")
-        st.rerun()
+    balance_column_config = {
+        "name": st.column_config.TextColumn("Member", disabled=True),
+        "total_contributed": st.column_config.NumberColumn("Total Contributed $", format="$%.2f"),
+        "current_balance": st.column_config.NumberColumn("Current Cash Balance $", format="$%.2f", disabled=True),
+        "total_invested": st.column_config.NumberColumn("Total Invested $", format="$%.2f", disabled=True),
+        "fees": st.column_config.NumberColumn("Fees $", format="$%.2f"),
+    }
+    if st.session_state.is_admin:
+        edited_df = st.data_editor(
+            df_with_total,
+            column_config=balance_column_config,
+            width="stretch",
+            hide_index=True,
+        )
+        if not edited_df.iloc[:-1].equals(df_display):
+            for i, row in edited_df.iloc[:-1].iterrows():
+                data["members"][i]["total_contributed"] = float(row["total_contributed"])
+            if save_members(data["members"]):
+                st.success("✅ Balances updated")
+                st.rerun()
+            else:
+                st.error(f"Save failed: {get_last_supabase_error()}")
+    else:
+        st.dataframe(df_with_total, width="stretch", hide_index=True)
     st.subheader("💰 Funding Needs")
     needs = []
     for m in data["members"]:
@@ -1420,9 +1437,11 @@ with tab1:
                     "text": new_comment.strip(),
                     "resolved": False
                 })
-                save_comments(comments)
-                st.success("Comment posted!")
-                st.rerun()
+                if save_comments(comments):
+                    st.success("Comment posted!")
+                    st.rerun()
+                else:
+                    st.error(f"Save failed: {get_last_supabase_error()}")
     if comments:
         comments_df = pd.DataFrame(comments)
         csv = comments_df.to_csv(index=False).encode('utf-8')
@@ -1440,18 +1459,21 @@ with tab1:
                 with col_a:
                     if st.button("Mark Resolved", key=f"res_{i}"):
                         comments[i]["resolved"] = True
-                        save_comments(comments)
-                        st.rerun()
-                with col_b:
-                    if st.button("Delete", key=f"del_{i}"):
-                        code = st.text_input("Admin Code (1998)", type="password", key=f"code_{i}")
-                        if code == "1998":
-                            del comments[i]
-                            save_comments(comments)
-                            st.success("Comment deleted")
+                        if save_comments(comments):
                             st.rerun()
                         else:
-                            st.error("Incorrect code")
+                            st.error(f"Save failed: {get_last_supabase_error()}")
+                if st.session_state.is_admin:
+                    with col_b:
+                        with st.form(key=f"delete_comment_{i}"):
+                            st.caption("Admin only")
+                            if st.form_submit_button("Delete Comment"):
+                                del comments[i]
+                                if save_comments(comments):
+                                    st.success("Comment deleted")
+                                    st.rerun()
+                                else:
+                                    st.error(f"Save failed: {get_last_supabase_error()}")
     else:
         st.info("No comments yet.")
 
@@ -1580,9 +1602,11 @@ with tab2:
                 portfolio_history.append(new_snapshot)
                 # Sort by date just in case
                 portfolio_history = sorted(portfolio_history, key=lambda x: x["date"])
-                save_to_supabase("portfolio_history", portfolio_history)
-                st.success(f"✅ Snapshot for {snap_date} recorded successfully!")
-                st.rerun()
+                if save_to_supabase("portfolio_history", portfolio_history):
+                    st.success(f"✅ Snapshot for {snap_date} recorded successfully!")
+                    st.rerun()
+                else:
+                    st.error(f"Save failed: {get_last_supabase_error()}")
 
     with col_btn2:
         if portfolio_history:
@@ -1665,9 +1689,12 @@ with tab2:
                     "efaic_strategy": strategy,
                     "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M")
                 }
-                save_investment_goals(goals)
-                st.success(f"✅ Saved for {ticker} (shared with all members)")
-                st.rerun()
+                if save_investment_goals(goals):
+                    st.session_state.investment_goals = load_investment_goals()
+                    st.success(f"✅ Saved for {ticker} (shared with all members)")
+                    st.rerun()
+                else:
+                    st.error(f"Save failed: {get_last_supabase_error()}")
 
     # Investment Goals Summary: Always show every current portfolio ticker
     st.markdown("**Investment Goals Summary**")
@@ -1761,70 +1788,66 @@ with tab4:
 
         st.dataframe(txn_df_display, width="stretch", hide_index=True)
 
-        # ====================== MANUAL ALLOCATION EDITOR ======================
-        st.markdown("---")
-        st.subheader("✏️ Manual Allocation Editor")
-        st.caption("Select a transaction below to manually adjust how the amount is split between members. Changes are saved permanently.")
+        if st.session_state.is_admin:
+            st.markdown("---")
+            st.subheader("✏️ Manual Allocation Editor")
+            st.caption("Admin only — adjust how a transaction is split between members.")
 
-        # Create a user-friendly list of transactions
-        txn_options = []
-        for i, txn in enumerate(data["transactions"]):
-            label = f"{txn.get('date')} | {txn.get('type', 'Unknown')} | {txn.get('ticker', '')} | ${abs(txn.get('amount', 0)):,.2f}"
-            txn_options.append((label, i))
+            txn_options = []
+            for i, txn in enumerate(data["transactions"]):
+                label = f"{txn.get('date')} | {txn.get('type', 'Unknown')} | {txn.get('ticker', '')} | ${abs(txn.get('amount', 0)):,.2f}"
+                txn_options.append((label, i))
 
-        if txn_options:
-            selected_label, real_idx = st.selectbox(
-                "Select transaction to edit allocation",
-                options=txn_options,
-                format_func=lambda x: x[0]
-            )
-
-            selected_txn = data["transactions"][real_idx]
-            current_alloc = selected_txn.get("allocations", {})
-
-            st.write(f"**Editing:** {selected_label}")
-
-            with st.form(key=f"edit_alloc_{real_idx}"):
-                
-                start_fresh = st.checkbox(
-                    "Start with all members at $0 (recommended for full manual overrides)", 
-                    value=False,
-                    key=f"fresh_{real_idx}"
+            if txn_options:
+                selected_label, real_idx = st.selectbox(
+                    "Select transaction to edit allocation",
+                    options=txn_options,
+                    format_func=lambda x: x[0],
                 )
 
-                new_allocations = {}
-                cols = st.columns(3)
+                selected_txn = data["transactions"][real_idx]
+                current_alloc = selected_txn.get("allocations", {})
 
-                for i, member in enumerate(members_list):
-                    with cols[i % 3]:
-                        if start_fresh:
-                            default_value = 0.0
+                st.write(f"**Editing:** {selected_label}")
+
+                with st.form(key=f"edit_alloc_{real_idx}"):
+                    start_fresh = st.checkbox(
+                        "Start with all members at $0 (recommended for full manual overrides)",
+                        value=False,
+                        key=f"fresh_{real_idx}",
+                    )
+
+                    new_allocations = {}
+                    cols = st.columns(3)
+
+                    for i, member in enumerate(members_list):
+                        with cols[i % 3]:
+                            if start_fresh:
+                                default_value = 0.0
+                            else:
+                                default_value = current_alloc.get(member, 0.0)
+
+                            new_allocations[member] = st.number_input(
+                                member,
+                                value=float(default_value),
+                                step=0.01,
+                                format="%.2f",
+                                key=f"alloc_{real_idx}_{member}",
+                            )
+
+                    submitted = st.form_submit_button("💾 Save Manual Allocation", type="primary")
+
+                    if submitted:
+                        data["transactions"][real_idx]["allocations"] = new_allocations
+                        data["transactions"][real_idx]["manual_allocation"] = True
+                        if save_transactions(data["transactions"]):
+                            data["transactions"] = load_transactions()
+                            st.success("✅ Manual allocation saved successfully!")
+                            st.rerun()
                         else:
-                            default_value = current_alloc.get(member, 0.0)
-
-                        new_allocations[member] = st.number_input(
-                            member,
-                            value=float(default_value),
-                            step=0.01,
-                            format="%.2f",
-                            key=f"alloc_{real_idx}_{member}"
-                        )
-
-                submitted = st.form_submit_button("💾 Save Manual Allocation", type="primary")
-
-                if submitted:
-                    # Save the manual allocation
-                    data["transactions"][real_idx]["allocations"] = new_allocations
-                    data["transactions"][real_idx]["manual_allocation"] = True
-                    save_transactions(data["transactions"])
-
-                    # === CRITICAL FIX: Reload fresh data from Supabase ===
-                    data["transactions"] = load_transactions()
-
-                    st.success("✅ Manual allocation saved successfully!")
-                    st.rerun()
-        else:
-            st.info("No transactions available to edit.")
+                            st.error(f"Save failed: {get_last_supabase_error()}")
+            else:
+                st.info("No transactions available to edit.")
     else:
         st.info("No transactions yet.")
 
@@ -2172,24 +2195,24 @@ with tab7:
         if st.button("Create Poll & Generate Email"):
             poll_date = datetime.now().strftime("%Y-%m-%d")
             due_date = (datetime.now() + timedelta(days=5)).strftime("%Y-%m-%d")
-            new_poll = {
-                "id": len(st.session_state.meeting_proposals) + 1,
-                "week_start": week_start.strftime("%Y-%m-%d"),
-                "week_end": week_end.strftime("%Y-%m-%d"),
-                "times": proposed_times,
-                "created": poll_date
-            }
-            st.session_state.meeting_proposals.append(new_poll)
-            save_polls(st.session_state.meeting_proposals)
-            poll_email = f"""Subject: EFA Investment Club - Availability Poll Open
+            ok, msg, refreshed_polls = persist_create_poll(
+                week_start.strftime("%Y-%m-%d"),
+                week_end.strftime("%Y-%m-%d"),
+                proposed_times,
+            )
+            if ok and refreshed_polls is not None:
+                st.session_state.meeting_proposals = refreshed_polls
+                poll_email = f"""Subject: EFA Investment Club - Availability Poll Open
 Hello Team,
 Antonio has initiated a poll to schedule our next 1-hour meeting the week of {week_start.strftime('%B %d')} – {week_end.strftime('%B %d, %Y')}.
 This request was created on {poll_date}. Please log into the EFA Club site and provide your availability **by {due_date}**.
 Thank you!
 – EFA Investment Club"""
-            st.session_state.poll_email_text = poll_email
-            st.success("✅ Poll created and saved!")
-            st.rerun()
+                st.session_state.poll_email_text = poll_email
+                st.success(f"✅ {msg}")
+                st.rerun()
+            else:
+                st.error(msg or get_last_supabase_error() or "Failed to create poll.")
 
     if st.session_state.poll_email_text:
         st.text_area("📧 Poll Email – Click inside, Ctrl+A, then Copy",
@@ -2211,12 +2234,20 @@ Thank you!
                     key=f"poll_{i}_{poll.get('id', i)}"
                 )
                 if st.button("Submit / Update Availability", key=f"submit_{i}"):
-                    if poll_key not in st.session_state.availability_responses:
-                        st.session_state.availability_responses[poll_key] = {}
-                    st.session_state.availability_responses[poll_key][st.session_state.username] = selected
-                    save_availability_responses(st.session_state.availability_responses)
-                    st.success("✅ Availability updated!")
-                    st.rerun()
+                    ok, msg, refreshed_av = persist_member_availability(
+                        poll_key,
+                        st.session_state.username,
+                        selected,
+                    )
+                    if ok and refreshed_av is not None:
+                        st.session_state.availability_responses = normalize_availability_responses(
+                            refreshed_av,
+                            st.session_state.meeting_proposals,
+                        )
+                        st.success(f"✅ {msg}")
+                        st.rerun()
+                    else:
+                        st.error(msg or get_last_supabase_error() or "Failed to save availability.")
                 st.markdown("**Availability Summary for this poll**")
                 responded = list(poll_responses.keys())
                 all_members = list(MEMBER_CREDENTIALS.keys())
@@ -2248,18 +2279,16 @@ We will need nearly everyone for the first meeting of the quarter to reach conse
 See you then!
 – EFA Investment Club"""
             st.session_state.final_email_text = final_email
-            new_meeting = {
-                "id": len(st.session_state.finalized_meetings) + 1,
-                "date": final_date.strftime('%Y-%m-%d'),
-                "time": final_time,
-                "note_entries": [],
-                "attachments": [],
-                "votes": []
-            }
-            st.session_state.finalized_meetings.append(new_meeting)
-            save_finalized_meetings(st.session_state.finalized_meetings)
-            st.success("✅ Meeting set and saved to Supabase!")
-            st.rerun()
+            ok, msg, refreshed_meetings = persist_create_meeting(
+                final_date.strftime("%Y-%m-%d"),
+                final_time,
+            )
+            if ok and refreshed_meetings is not None:
+                st.session_state.finalized_meetings = refreshed_meetings
+                st.success(f"✅ {msg}")
+                st.rerun()
+            else:
+                st.error(msg or get_last_supabase_error() or "Failed to save meeting.")
 
     if st.session_state.final_email_text:
         st.text_area("📧 Final Meeting Email – Click inside, Ctrl+A, then Copy",
@@ -2299,22 +2328,32 @@ See you then!
                                     with col_del:
                                         delete_note = st.form_submit_button("🗑️ Delete Note")
                                     if save_edit:
-                                        st.session_state.finalized_meetings[idx]["note_entries"][n_idx]["text"] = edited_text.strip()
-                                        st.session_state.finalized_meetings[idx]["note_entries"][n_idx]["updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
-                                        if save_finalized_meetings(st.session_state.finalized_meetings):
-                                            st.session_state.finalized_meetings = load_finalized_meetings()
-                                            st.success("Note updated!")
+                                        ok, msg, refreshed_meetings = persist_update_meeting_note(
+                                            meeting.get("id"),
+                                            note.get("id"),
+                                            edited_text,
+                                            current_user,
+                                            is_admin,
+                                        )
+                                        if ok and refreshed_meetings is not None:
+                                            st.session_state.finalized_meetings = refreshed_meetings
+                                            st.success(msg)
                                             st.rerun()
                                         else:
-                                            st.error(f"Save failed: {get_last_supabase_error()}")
+                                            st.error(msg or get_last_supabase_error() or "Failed to save note.")
                                     if delete_note:
-                                        st.session_state.finalized_meetings[idx]["note_entries"].pop(n_idx)
-                                        if save_finalized_meetings(st.session_state.finalized_meetings):
-                                            st.session_state.finalized_meetings = load_finalized_meetings()
-                                            st.success("Note deleted.")
+                                        ok, msg, refreshed_meetings = persist_delete_meeting_note(
+                                            meeting.get("id"),
+                                            note.get("id"),
+                                            current_user,
+                                            is_admin,
+                                        )
+                                        if ok and refreshed_meetings is not None:
+                                            st.session_state.finalized_meetings = refreshed_meetings
+                                            st.success(msg)
                                             st.rerun()
                                         else:
-                                            st.error(f"Save failed: {get_last_supabase_error()}")
+                                            st.error(msg or get_last_supabase_error() or "Failed to delete note.")
                             else:
                                 st.write(note.get("text", ""))
                 else:
@@ -2328,20 +2367,17 @@ See you then!
                     )
                     if st.form_submit_button("➕ Add Note", type="primary"):
                         if new_note_text.strip():
-                            next_id = max([n.get("id", 0) for n in note_entries], default=0) + 1
-                            st.session_state.finalized_meetings[idx].setdefault("note_entries", []).append({
-                                "id": next_id,
-                                "author": current_user,
-                                "text": new_note_text.strip(),
-                                "created": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                                "updated": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                            })
-                            if save_finalized_meetings(st.session_state.finalized_meetings):
-                                st.session_state.finalized_meetings = load_finalized_meetings()
-                                st.success("Note added!")
+                            ok, msg, refreshed_meetings = persist_add_meeting_note(
+                                meeting.get("id"),
+                                current_user,
+                                new_note_text,
+                            )
+                            if ok and refreshed_meetings is not None:
+                                st.session_state.finalized_meetings = refreshed_meetings
+                                st.success(msg)
                                 st.rerun()
                             else:
-                                st.error(f"Save failed: {get_last_supabase_error()}")
+                                st.error(msg or get_last_supabase_error() or "Failed to add note.")
                         else:
                             st.warning("Note cannot be empty.")
 
@@ -2553,17 +2589,20 @@ See you then!
 
                 st.divider()
 
-                # Change / Cancel buttons (keep existing)
-                col1, col2 = st.columns(2)
-                with col1:
-                    if st.button("Change this meeting", key=f"change_meet_{idx}"):
-                        st.info("Use the date/time picker above and press 'Set Meeting' to update this meeting.")
-                with col2:
-                    if st.button("Cancel this meeting", key=f"cancel_meet_{idx}"):
-                        st.session_state.finalized_meetings.pop(idx)
-                        save_finalized_meetings(st.session_state.finalized_meetings)
-                        st.success("✅ Meeting cancelled and removed!")
-                        st.rerun()
+                if st.session_state.is_admin:
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        if st.button("Change this meeting", key=f"change_meet_{idx}"):
+                            st.info("Use the date/time picker above and press 'Set Meeting' to update this meeting.")
+                    with col2:
+                        if st.button("Cancel this meeting", key=f"cancel_meet_{idx}"):
+                            ok, msg, refreshed_meetings = persist_cancel_meeting(meeting.get("id"))
+                            if ok and refreshed_meetings is not None:
+                                st.session_state.finalized_meetings = refreshed_meetings
+                                st.success(f"✅ {msg}")
+                                st.rerun()
+                            else:
+                                st.error(msg or get_last_supabase_error() or "Failed to cancel meeting.")
 
     st.caption("✅ All scheduler data (polls + availability + finalized meetings) fully persists in Supabase")
 
@@ -2914,15 +2953,12 @@ with tab9:
                         except Exception as e:
                             st.error(f"Error on {ticker}: {e}")
                     
-                    st.session_state.analysis_history.insert(0, {
-                        "type": "Portfolio",
-                        "results": results,
-                        "time": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                    })
-                    if save_analysis_history(st.session_state.analysis_history):
+                    ok, err, refreshed_history = persist_analysis_batch("Portfolio", results)
+                    if ok and refreshed_history is not None:
+                        st.session_state.analysis_history = refreshed_history
                         st.success("✅ Portfolio Analysis Complete!")
                     else:
-                        st.warning("Analysis ran but failed to persist to Supabase. Results shown for this session.")
+                        st.warning(err or "Analysis ran but failed to persist to Supabase. Results shown for this session.")
 
     with col2:
         if st.button("🔄 Refresh Price Cache (used by Holdings)", type="secondary"):
@@ -2982,15 +3018,12 @@ with tab9:
                         st.error(f"Error on {ticker}: {e}")
 
                 if watchlist_results:
-                    st.session_state.analysis_history.insert(0, {
-                        "type": "Watchlist",
-                        "results": watchlist_results,
-                        "time": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                    })
-                    if save_analysis_history(st.session_state.analysis_history):
+                    ok, err, refreshed_history = persist_analysis_batch("Watchlist", watchlist_results)
+                    if ok and refreshed_history is not None:
+                        st.session_state.analysis_history = refreshed_history
                         st.success("✅ Watchlist Analysis Complete!")
                     else:
-                        st.warning("Analysis ran but failed to persist to Supabase. Results shown for this session.")
+                        st.warning(err or "Analysis ran but failed to persist to Supabase. Results shown for this session.")
 
     latest_watchlist = get_latest_analysis_run(st.session_state.analysis_history, "Watchlist")
     if latest_watchlist and latest_watchlist.get("results"):

@@ -179,19 +179,34 @@ def save_analysis_history(history):
 
 
 def load_polls():
-    return load_from_supabase("polls", [])
+    supa = load_from_supabase("polls", None)
+    if supa and isinstance(supa, list) and len(supa) > 0:
+        return supa
+    local = load_json("polls.json", [])
+    return local if isinstance(local, list) else []
 
 
 def save_polls(polls_list):
+    local_ok = save_json("polls.json", list(polls_list or []))
+    if supabase is None:
+        return local_ok
     return save_to_supabase("polls", polls_list)
 
 
 def load_availability_responses():
-    return load_from_supabase("availability_responses", {})
+    supa = load_from_supabase("availability_responses", None)
+    if supa and isinstance(supa, dict) and len(supa) > 0:
+        return supa
+    local = load_json("availability_responses.json", {})
+    return local if isinstance(local, dict) else {}
 
 
 def save_availability_responses(responses_dict):
-    return save_to_supabase("availability_responses", responses_dict)
+    payload = responses_dict if isinstance(responses_dict, dict) else {}
+    local_ok = save_json("availability_responses.json", payload)
+    if supabase is None:
+        return local_ok
+    return save_to_supabase("availability_responses", payload)
 
 
 def load_finalized_meetings():
