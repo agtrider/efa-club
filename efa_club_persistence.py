@@ -195,21 +195,36 @@ def save_availability_responses(responses_dict):
 
 
 def load_finalized_meetings():
-    meetings = load_from_supabase("finalized_meetings", [])
-    return [normalize_meeting_record(m) for m in (meetings or [])]
+    supa = load_from_supabase("finalized_meetings", None)
+    if supa and isinstance(supa, list) and len(supa) > 0:
+        return [normalize_meeting_record(m) for m in supa]
+    local = load_json("finalized_meetings.json", [])
+    meetings = local if isinstance(local, list) else []
+    return [normalize_meeting_record(m) for m in meetings]
 
 
 def save_finalized_meetings(meetings):
     cleaned = [normalize_meeting_record(m) for m in meetings]
-    save_json("finalized_meetings.json", cleaned)
+    local_ok = save_json("finalized_meetings.json", cleaned)
+    if supabase is None:
+        return local_ok
     return save_to_supabase("finalized_meetings", cleaned)
 
 
 def load_meeting_attachment_store():
-    return load_from_supabase("meeting_attachment_store", {})
+    supa = load_from_supabase("meeting_attachment_store", None)
+    if supa and isinstance(supa, dict) and len(supa) > 0:
+        return supa
+    local = load_json("meeting_attachment_store.json", {})
+    return local if isinstance(local, dict) else {}
 
 
 def save_meeting_attachment_store(store):
+    if not isinstance(store, dict):
+        store = {}
+    local_ok = save_json("meeting_attachment_store.json", store)
+    if supabase is None:
+        return local_ok
     return save_to_supabase("meeting_attachment_store", store)
 
 

@@ -20,9 +20,9 @@ from efa_club_auth import (
 )
 from efa_club_meetings import (
     MAX_MEETING_ATTACHMENT_BYTES,
-    add_meeting_attachment,
     get_attachment_download,
     log_site_access,
+    persist_meeting_attachment,
 )
 from efa_club_persistence import (
     clear_price_cache,
@@ -2374,13 +2374,13 @@ See you then!
                     help="Otter.ai, Fireflies, Zoom AI Companion, etc. Stored as a download — not shown inline.",
                 )
                 if st.button("📤 Upload Attachment", key=f"upload_att_{idx}") and uploaded_minutes is not None:
-                    ok, err = add_meeting_attachment(
-                        st.session_state.finalized_meetings[idx],
+                    ok, err, refreshed_meetings = persist_meeting_attachment(
+                        meeting.get("id"),
                         uploaded_minutes,
                         current_user,
                     )
-                    if ok and save_finalized_meetings(st.session_state.finalized_meetings):
-                        st.session_state.finalized_meetings = load_finalized_meetings()
+                    if ok and refreshed_meetings is not None:
+                        st.session_state.finalized_meetings = refreshed_meetings
                         st.success(f"Uploaded {uploaded_minutes.name}")
                         st.rerun()
                     else:
