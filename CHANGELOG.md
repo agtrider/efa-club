@@ -1,5 +1,23 @@
 # EFA Investment Club — Changelog
 
+## 2026-06-18 — Persistence hardening + admin gating
+
+**Full detail:** see [CHANGELOG-2026-06-18.md](CHANGELOG-2026-06-18.md)
+
+**Commits:** `4ad583c`, `780bb3b`, `e7c4351`
+
+### Summary
+- **Attachments & votes** in Meeting Scheduler now reload fresh storage before save; local JSON mirrors added.
+- **Scheduler polls, availability, meetings, notes** use the same persist pattern; save failures surface in UI.
+- **Tab 1** no longer auto-saves members every page load; balance editor admin-only.
+- **Tab 2/4/9** save-result checks and fresh reload where needed.
+- **Admin UI** (CSV upload, access tracker, allocation editor, meeting admin actions, etc.) restricted to **Antonio Calderon** only.
+- **Tests:** 21 pytest tests passing (8 new persistence tests).
+
+**After deploy:** Re-upload lost attachments; have members re-submit votes if lost before fix.
+
+---
+
 ## 2026-06-16 (h) — CI fix (test + ui-smoke jobs)
 
 **Root cause:** `local_data/` gitignored → site test agent failed on missing watchlist; live yfinance/Finnhub calls flaky on GitHub Actions; Playwright used brittle Streamlit selectors and empty watchlist (no Tab 6 table).
