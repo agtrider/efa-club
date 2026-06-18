@@ -819,6 +819,95 @@ def delete_vote_by_id(meeting, vote_id):
     return meeting, len(meeting.get("votes", [])) < before
 
 
+def _vote_index(meeting, vote_id):
+    vid = safe_int(vote_id)
+    for idx, vote in enumerate(meeting.get("votes") or []):
+        if safe_int(vote.get("id")) == vid:
+            return idx
+    return None
+
+
+def _sync_meeting_votes(meeting):
+    normalized = normalize_meeting_votes(meeting)
+    meeting.clear()
+    meeting.update(normalized)
+    return meeting
+
+
+def _persist_vote_change(meeting_id, updater):
+    from efa_club_meetings import persist_meeting_update
+
+    return persist_meeting_update(meeting_id, updater)
+
+
+def persist_create_vote(meeting_id, question):
+    question = str(question or "").strip()
+    if not question:
+        return False, "Question cannot be empty.", None
+
+    def updater(meeting):
+        _sync_meeting_votes(meeting)
+        votes = meeting.get("votes") or []
+        existing_q = {v.get("question", "").strip().lower() for v in votes}
+        if question.lower() in existing_q:
+            return False, "A vote with this exact question already exists for this meeting."
+        votes.append({
+            "id": next_vote_id(votes),
+            "question": question,
+            "votes": {},
+            "created": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        })
+        meeting["votes"] = votes
+        return True, "Vote created!"
+
+    return _persist_vote_change(meeting_id, updater)
+
+
+def persist_member_vote(meeting_id, vote_id, username, choice):
+    def updater(meeting):
+        _sync_meeting_votes(meeting)
+        vote_idx = _vote_index(meeting, vote_id)
+        if vote_idx is None:
+            return False, "Vote not found."
+        return record_member_vote(meeting["votes"][vote_idx], username, choice)
+
+    return _persist_vote_change(meeting_id, updater)
+
+
+def persist_admin_vote_question(meeting_id, vote_id, question):
+    def updater(meeting):
+        _sync_meeting_votes(meeting)
+        vote_idx = _vote_index(meeting, vote_id)
+        if vote_idx is None:
+            return False, "Vote not found."
+        return admin_update_vote_question(meeting["votes"][vote_idx], question)
+
+    return _persist_vote_change(meeting_id, updater)
+
+
+def persist_admin_member_vote(meeting_id, vote_id, member, choice):
+    def updater(meeting):
+        _sync_meeting_votes(meeting)
+        vote_idx = _vote_index(meeting, vote_id)
+        if vote_idx is None:
+            return False, "Vote not found."
+        return admin_set_member_vote(meeting["votes"][vote_idx], member, choice)
+
+    return _persist_vote_change(meeting_id, updater)
+
+
+def persist_delete_vote(meeting_id, vote_id):
+    def updater(meeting):
+        updated, removed = delete_vote_by_id(meeting, vote_id)
+        if not removed:
+            return False, "Could not delete vote item."
+        meeting.clear()
+        meeting.update(updated)
+        return True, f"Vote #{vote_id} deleted."
+
+    return _persist_vote_change(meeting_id, updater)
+
+
 def tally_vote_ballot(ballot, total_members=VOTE_TOTAL_MEMBERS, majority=VOTE_MAJORITY):
     ballot = ballot or {}
     yes = sum(1 for v in ballot.values() if v == "Yes")

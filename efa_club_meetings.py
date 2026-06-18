@@ -78,6 +78,31 @@ def add_meeting_attachment(meeting, uploaded_file, username):
     return True, ""
 
 
+def persist_meeting_update(meeting_id, updater):
+    """
+    Reload meetings from storage, apply updater(meeting) -> (ok, message), then save.
+    Returns (ok, message, refreshed_meetings_or_none).
+    """
+    if not meeting_id:
+        return False, "Meeting is missing an id.", None
+
+    meetings = load_finalized_meetings()
+    meeting_idx = next((i for i, m in enumerate(meetings) if m.get("id") == meeting_id), None)
+    if meeting_idx is None:
+        return False, "Meeting not found.", None
+
+    meeting = meetings[meeting_idx]
+    ok, msg = updater(meeting)
+    if not ok:
+        return False, msg, None
+
+    meetings[meeting_idx] = meeting
+    if not save_finalized_meetings(meetings):
+        return False, get_last_supabase_error() or "Failed to save meeting.", None
+
+    return True, msg, load_finalized_meetings()
+
+
 def persist_meeting_attachment(meeting_id, uploaded_file, username):
     """Save attachment bytes and meeting metadata from fresh persisted state."""
     if uploaded_file is None:

@@ -60,21 +60,21 @@ from efa_club_persistence import (
     supabase,
 )
 from efa_club_services import (
-    admin_set_member_vote,
-    admin_update_vote_question,
     build_fundamentals_row,
     can_edit_note,
     can_member_cast_vote,
-    delete_vote_by_id,
     fetch_ticker_info,
     fundamentals_row_has_core_data,
     fundamentals_row_is_healthy,
     member_vote_choice,
-    next_vote_id,
     normalize_meeting_record,
     normalize_availability_responses,
     normalize_vote_item,
-    record_member_vote,
+    persist_admin_member_vote,
+    persist_admin_vote_question,
+    persist_create_vote,
+    persist_delete_vote,
+    persist_member_vote,
     tally_vote_ballot,
     validate_data_sources,
     VOTE_TOTAL_MEMBERS,
@@ -2412,20 +2412,13 @@ See you then!
                         if st.form_submit_button("Create Vote"):
                             q = vote_question.strip()
                             if q:
-                                existing_q = {v.get("question", "").strip().lower() for v in votes}
-                                if q.lower() in existing_q:
-                                    st.warning("A vote with this exact question already exists for this meeting.")
-                                else:
-                                    new_vote = {
-                                        "id": next_vote_id(votes),
-                                        "question": q,
-                                        "votes": {},
-                                        "created": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                                    }
-                                    st.session_state.finalized_meetings[idx]["votes"].append(new_vote)
-                                    save_finalized_meetings(st.session_state.finalized_meetings)
-                                    st.success("Vote created!")
+                                ok, msg, refreshed_meetings = persist_create_vote(meeting.get("id"), q)
+                                if ok and refreshed_meetings is not None:
+                                    st.session_state.finalized_meetings = refreshed_meetings
+                                    st.success(msg)
                                     st.rerun()
+                                else:
+                                    st.warning(msg or get_last_supabase_error() or "Failed to create vote.")
 
                 # Display existing votes
                 if votes:
@@ -2445,32 +2438,32 @@ See you then!
                                         key=f"admin_vote_q_{idx}_{v_idx}",
                                     )
                                     if st.form_submit_button("Save question"):
-                                        ok, msg = admin_update_vote_question(
-                                            st.session_state.finalized_meetings[idx]["votes"][v_idx],
+                                        ok, msg, refreshed_meetings = persist_admin_vote_question(
+                                            meeting.get("id"),
+                                            vote_id,
                                             new_q,
                                         )
-                                        if ok:
-                                            save_finalized_meetings(st.session_state.finalized_meetings)
+                                        if ok and refreshed_meetings is not None:
+                                            st.session_state.finalized_meetings = refreshed_meetings
                                             st.success(msg)
                                             st.rerun()
                                         else:
-                                            st.error(msg)
+                                            st.error(msg or get_last_supabase_error() or "Failed to save vote question.")
                                 if st.button(
                                     f"Delete Vote #{vote_id}",
                                     key=f"admin_delete_vote_{idx}_{v_idx}",
                                     type="secondary",
                                 ):
-                                    meeting_row, removed = delete_vote_by_id(
-                                        st.session_state.finalized_meetings[idx],
+                                    ok, msg, refreshed_meetings = persist_delete_vote(
+                                        meeting.get("id"),
                                         vote_id,
                                     )
-                                    if removed:
-                                        st.session_state.finalized_meetings[idx] = meeting_row
-                                        save_finalized_meetings(st.session_state.finalized_meetings)
-                                        st.success(f"Vote #{vote_id} deleted.")
+                                    if ok and refreshed_meetings is not None:
+                                        st.session_state.finalized_meetings = refreshed_meetings
+                                        st.success(msg)
                                         st.rerun()
                                     else:
-                                        st.error("Could not delete vote item.")
+                                        st.error(msg or get_last_supabase_error() or "Could not delete vote item.")
 
                                 st.markdown("**Edit member votes**")
                                 for member_name in MEMBER_CREDENTIALS.keys():
@@ -2493,17 +2486,18 @@ See you then!
                                             key=f"admin_vote_apply_{idx}_{v_idx}_{member_name}",
                                         ):
                                             pick = None if admin_choice == "—" else admin_choice
-                                            ok, msg = admin_set_member_vote(
-                                                st.session_state.finalized_meetings[idx]["votes"][v_idx],
+                                            ok, msg, refreshed_meetings = persist_admin_member_vote(
+                                                meeting.get("id"),
+                                                vote_id,
                                                 member_name,
                                                 pick,
                                             )
-                                            if ok:
-                                                save_finalized_meetings(st.session_state.finalized_meetings)
+                                            if ok and refreshed_meetings is not None:
+                                                st.session_state.finalized_meetings = refreshed_meetings
                                                 st.success(msg)
                                                 st.rerun()
                                             else:
-                                                st.error(msg)
+                                                st.error(msg or get_last_supabase_error() or "Failed to save vote.")
 
                         current_vote = member_vote_choice(vote, user)
                         col_vote, col_tally = st.columns([1, 1])
@@ -2518,14 +2512,18 @@ See you then!
                                     horizontal=True,
                                 )
                                 if st.button("Submit Vote", key=f"submit_vote_{idx}_{v_idx}"):
-                                    target = st.session_state.finalized_meetings[idx]["votes"][v_idx]
-                                    ok, msg = record_member_vote(target, user, choice)
-                                    if ok:
-                                        save_finalized_meetings(st.session_state.finalized_meetings)
+                                    ok, msg, refreshed_meetings = persist_member_vote(
+                                        meeting.get("id"),
+                                        vote_id,
+                                        user,
+                                        choice,
+                                    )
+                                    if ok and refreshed_meetings is not None:
+                                        st.session_state.finalized_meetings = refreshed_meetings
                                         st.success(msg)
                                         st.rerun()
                                     else:
-                                        st.error(msg)
+                                        st.error(msg or get_last_supabase_error() or "Failed to save your vote.")
                             else:
                                 st.warning("Unable to record vote — please refresh and try again.")
 
