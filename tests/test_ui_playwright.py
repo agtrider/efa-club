@@ -62,6 +62,11 @@ def test_tab6_fundamentals_section_loads(logged_in_app):
 
     markdown_text = " ".join(m.value for m in at.markdown if m.value)
     assert "Fundamentals" in markdown_text
+
+    load_btn = next((b for b in at.button if "Load Fundamentals" in (b.label or "")), None)
+    assert load_btn is not None, f"Load Fundamentals button missing; buttons={[b.label for b in at.button]}"
+    load_btn.click().run()
+
     assert "FSLR" in markdown_text or any(
         "FSLR" in str(df.value) for df in at.dataframe if getattr(df, "value", None) is not None
     )

@@ -65,8 +65,13 @@ from efa_club_persistence import (
     supabase,
 )
 from efa_club_services import (
+    PRICE_INTRADAY_TTL_MINUTES,
+    acceptable_cached_price,
     build_fundamentals_row,
+    cache_fresh_enough,
     can_edit_note,
+    delete_transaction_at,
+    format_transaction_option_label,
     can_member_cast_vote,
     fetch_ticker_info,
     fundamentals_row_has_core_data,
@@ -408,17 +413,150 @@ def _fast_info_price(fi, *keys):
     return 0.0
 
 
-def _cached_market_price(tkr, prefer_eod=None):
-    """Return last known good market price from Supabase/local cache (never csv_fill)."""
-    cached = load_last_prices().get(tkr, {})
-    price = float(cached.get("price", 0) or 0)
+def _price_session_context():
+    session = get_market_session()
+    try:
+        today = datetime.now(pytz.timezone("US/Eastern")).strftime("%Y-%m-%d")
+    except Exception:
+        today = datetime.now().strftime("%Y-%m-%d")
+    target_eod = get_last_trading_day_str()
+    prior_eod = get_prior_trading_day_str()
+    return session, today, target_eod, prior_eod
+
+
+def _ensure_last_prices_snapshot():
+    """One in-memory last_prices dict per rerun (avoids repeated Supabase reads)."""
+    if st.session_state.get("_last_prices_snapshot_dirty"):
+        st.session_state._last_prices_snapshot = load_last_prices()
+        st.session_state._last_prices_snapshot_dirty = False
+    if "_last_prices_snapshot" not in st.session_state:
+        st.session_state._last_prices_snapshot = load_last_prices()
+    return st.session_state._last_prices_snapshot
+
+
+def _invalidate_last_prices_snapshot():
+    st.session_state._last_prices_snapshot = load_last_prices()
+    st.session_state._last_prices_snapshot_dirty = False
+
+
+def get_prior_trading_day_str():
+    """Last completed US trading day before get_last_trading_day_str() during market hours."""
+    try:
+        et = pytz.timezone("US/Eastern")
+        target = datetime.strptime(get_last_trading_day_str(), "%Y-%m-%d").replace(tzinfo=et)
+        target -= timedelta(days=1)
+        while target.weekday() >= 5:
+            target -= timedelta(days=1)
+        return target.strftime("%Y-%m-%d")
+    except Exception:
+        return get_last_trading_day_str()
+
+
+def _acceptable_cached_price(meta, session=None):
+    _sess, today, target_eod, prior_eod = _price_session_context()
+    return acceptable_cached_price(
+        meta, session or _sess, today=today, target_eod=target_eod, prior_eod=prior_eod
+    )
+
+
+def _cache_fresh_enough(meta, session=None, force_live=False):
+    _sess, today, target_eod, prior_eod = _price_session_context()
+    return cache_fresh_enough(
+        meta, session or _sess, force_live=force_live, today=today, target_eod=target_eod, prior_eod=prior_eod
+    )
+
+
+def _cached_market_price(tkr, snapshot=None):
+    """Return last known good market price from snapshot (never csv_fill)."""
+    snap = snapshot if snapshot is not None else _ensure_last_prices_snapshot()
+    meta = snap.get(str(tkr).upper().strip(), {})
+    price = _acceptable_cached_price(meta)
     if price <= 0:
         return 0.0, ""
-    src = str(cached.get("source", "")).lower()
-    if src == "csv_fill":
-        return 0.0, ""
-    note = cached.get("timestamp", "") or "cached"
+    note = meta.get("timestamp", "") or "cached"
     return price, f" (cached: {note})"
+
+
+def _queue_last_price_entry(tkr, entry):
+    """Update in-memory snapshot; defer Supabase write until flush."""
+    snap = _ensure_last_prices_snapshot()
+    snap[str(tkr).upper().strip()] = entry
+    st.session_state._pending_last_prices_save = True
+
+
+def flush_pending_last_prices():
+    if st.session_state.get("_pending_last_prices_save"):
+        save_last_prices(st.session_state._last_prices_snapshot)
+        st.session_state._pending_last_prices_save = False
+
+
+def format_price_source_label(price, meta):
+    """Build Tab 2 Price Source text from a cached price metadata entry."""
+    if price <= 0:
+        return "zero"
+    meta = meta or {}
+    ts = meta.get("timestamp", "") or ""
+    src = str(meta.get("source", "")).lower()
+    as_of = meta.get("as_of", "")
+
+    if src == "eod_close" or "eod" in src:
+        label = "Final Daily Close (EOD)"
+        if as_of:
+            label += f" — as of {as_of}"
+        else:
+            label += f" — as of {get_last_trading_day_str()}"
+        return label
+    if src == "intraday":
+        label = "Live / Most Recent (Intraday)"
+        if as_of:
+            label += f" {as_of}"
+        return label
+
+    if "CSV fill" in ts:
+        return "CSV fill (first time - no yfinance data yet)"
+    if "yahoo chart" in ts.lower():
+        if "live" in ts.lower():
+            label = "Live (Yahoo chart)"
+        elif "prior close" in ts.lower() or "premarket" in ts.lower():
+            label = "Prior Close (Yahoo chart)"
+        elif "today close" in ts.lower() or "afterhours" in ts.lower():
+            label = "Today's Close (Yahoo chart)"
+        else:
+            label = "EOD Close (Yahoo chart)"
+        if as_of:
+            label += f" — {as_of}"
+        return label
+    if "finnhub" in ts.lower():
+        if "previous close" in ts.lower() or "EOD" in ts:
+            label = "Final Daily Close (EOD, finnhub)"
+        else:
+            label = "Live (finnhub)"
+        if as_of:
+            label += f" {as_of}"
+        return label
+    if "fast_info" in ts.lower():
+        if "previous" in ts.lower() or "EOD" in ts:
+            label = "Final Daily Close (EOD, fast_info)"
+        else:
+            label = "Live / Most Recent (fast_info)"
+        if as_of:
+            label += f" {as_of}"
+        return label
+    if "previous close" in ts.lower() or "EOD" in ts or "daily close" in ts.lower():
+        label = "Final Daily Close (EOD)"
+        if as_of:
+            label += f" {as_of}"
+        return label
+    if "intraday" in ts.lower() or "current" in ts.lower():
+        label = "Live / Most Recent (Intraday)"
+        if as_of:
+            label += f" {as_of}"
+        return label
+    if "yfinance" in ts:
+        return "Last yfinance price (check time)"
+    if price > 0:
+        return "Cached (last good price)"
+    return "zero"
 
 # ====================== FORCE FRESH LOAD (Now Safe) ======================
 if "watchlist" not in st.session_state:
@@ -546,99 +684,29 @@ def get_last_trade_price(ticker):
         return 0.0
 
 
-def get_price_with_source(ticker):
-    """Returns (price, source_label) for the diagnostics column in Tab 2.
-    Clearly distinguishes live intraday (during market hours) vs final daily EOD close (after hours).
-    Uses enhanced metadata when available (backward compatible with old cache entries).
-    """
+def get_price_with_source(ticker, price=None):
+    """Returns (price, source_label) for Tab 2 diagnostics without redundant fetches."""
     tkr = str(ticker).upper().strip()
     if not tkr or tkr in ("CASH", "-"):
         return 0.0, "zero"
 
-    token = st.session_state.get("price_refresh_token")
-    price = get_price(tkr, _refresh_token=token)
+    if price is None:
+        token = st.session_state.get("price_refresh_token")
+        force_live = st.session_state.get("_price_force_live", False)
+        price = get_price(tkr, _refresh_token=token, _force_live=force_live)
 
-    last_prices = load_last_prices()
-    meta = last_prices.get(tkr, {})
-    ts = meta.get("timestamp", "") or ""
-    src = meta.get("source", "").lower()
-    as_of = meta.get("as_of", "")
-
-    # New structured source takes precedence
-    if src == "eod_close" or "eod" in src:
-        label = "Final Daily Close (EOD)"
-        if as_of:
-            label += f" — as of {as_of}"
-        else:
-            label += f" — as of {get_last_trading_day_str()}"
-        return price, label
-    if src == "intraday":
-        label = "Live / Most Recent (Intraday)"
-        if as_of:
-            label += f" {as_of}"
-        return price, label
-
-    # Legacy timestamp string fallback (for old cached entries) + recognition of new sources
-    if "CSV fill" in ts:
-        return price, "CSV fill (first time - no yfinance data yet)"
-    elif "yahoo chart" in ts.lower():
-        if "live" in ts.lower():
-            label = "Live (Yahoo chart)"
-        elif "prior close" in ts.lower() or "premarket" in ts.lower():
-            label = "Prior Close (Yahoo chart)"
-        elif "today close" in ts.lower() or "afterhours" in ts.lower():
-            label = "Today's Close (Yahoo chart)"
-        else:
-            label = "EOD Close (Yahoo chart)"
-        if as_of:
-            label += f" — {as_of}"
-        return price, label
-    elif "finnhub" in ts.lower():
-        if "previous close" in ts.lower() or "EOD" in ts:
-            label = "Final Daily Close (EOD, finnhub)"
-        else:
-            label = "Live (finnhub)"
-        if as_of:
-            label += f" {as_of}"
-        return price, label
-    elif "fast_info" in ts.lower():
-        if "previous" in ts.lower() or "EOD" in ts:
-            label = "Final Daily Close (EOD, fast_info)"
-        else:
-            label = "Live / Most Recent (fast_info)"
-        if as_of:
-            label += f" {as_of}"
-        return price, label
-    elif "previous close" in ts.lower() or "EOD" in ts or "daily close" in ts.lower():
-        label = "Final Daily Close (EOD)"
-        if as_of:
-            label += f" {as_of}"
-        return price, label
-    elif "intraday" in ts.lower() or "current" in ts.lower():
-        label = "Live / Most Recent (Intraday)"
-        if as_of:
-            label += f" {as_of}"
-        return price, label
-    elif "yfinance" in ts:
-        return price, "Last yfinance price (check time)"
-    elif price > 0:
-        return price, "Cached (last good price)"
-    else:
-        return price, "zero"
+    meta = _ensure_last_prices_snapshot().get(tkr, {})
+    return price, format_price_source_label(price, meta)
 
 
 # ====================== PRICE FETCHER - SESSION-AWARE MARKET PRICE ======================
 @st.cache_data(ttl=180)
-def get_price(ticker, _refresh_token=None):
+def get_price(ticker, _refresh_token=None, _force_live=False):
     """
-    Always returns the best available market price:
-    - Before open (premarket): prior session close
-    - During regular hours: latest intraday price
-    - After close / weekend: that trading day's close
-    - If live fetch fails: last cached market price (never a purchase fill)
-
-    Primary source is Yahoo's chart API (direct HTTP). yfinance is backup only —
-    it rate-limits heavily on cloud hosts and fast_info keys changed in 1.x (lastPrice).
+    Cache-first market price:
+    - Uses in-memory last_prices when fresh for the current session
+    - Live fetch only when stale, missing, or Force Refresh (_force_live)
+    - If live fails: last cached price (never a purchase fill)
     """
     tkr = str(ticker).upper().strip()
     if not tkr or tkr in ("CASH", "-"):
@@ -647,20 +715,27 @@ def get_price(ticker, _refresh_token=None):
     session = get_market_session()
     is_open = session == "open"
     target_eod = get_last_trading_day_str()
+    snapshot = _ensure_last_prices_snapshot()
+    meta = snapshot.get(tkr, {})
+
+    if _cache_fresh_enough(meta, session, force_live=_force_live):
+        cached = _acceptable_cached_price(meta, session)
+        if cached > 0:
+            print(f"[get_price] {tkr}: CACHE_HIT ${cached:.2f}")
+            return cached
+
     final_price = 0.0
     source_note = ""
 
     try:
-        # 1. Yahoo chart API — most reliable path (no yfinance scraping)
+        print(f"[get_price] {tkr}: LIVE_FETCH")
         final_price, source_note = fetch_yahoo_session_price(tkr, session=session, target_eod=target_eod)
 
-        # 2. Finnhub (if API key configured)
         if final_price == 0:
             final_price, source_note = fetch_finnhub_quote(tkr)
             if final_price > 0 and is_open:
                 source_note = source_note.replace("quote", "live")
 
-        # 3. yfinance fallbacks (only when Yahoo/Finnhub miss)
         if final_price == 0:
             stock = yf.Ticker(tkr)
             fi = {}
@@ -687,19 +762,17 @@ def get_price(ticker, _refresh_token=None):
                 final_price, source_note = fetch_eod_close(stock, tkr, target_eod)
 
         if final_price > 0:
-            last_prices = load_last_prices()
             src_type = "intraday" if is_open else "eod_close"
             as_of = datetime.now().strftime("%Y-%m-%d") if is_open else target_eod
-            last_prices[tkr] = {
+            _queue_last_price_entry(tkr, {
                 "price": final_price,
                 "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M") + source_note,
                 "source": src_type,
                 "as_of": as_of,
-            }
-            save_last_prices(last_prices)
+            })
             return final_price
 
-        cached_price, _ = _cached_market_price(tkr)
+        cached_price, _ = _cached_market_price(tkr, snapshot)
         if cached_price > 0:
             print(f"[get_price] {tkr}: live fetch failed, using cached ${cached_price:.2f}")
             return cached_price
@@ -709,7 +782,7 @@ def get_price(ticker, _refresh_token=None):
 
     except Exception as e:
         print(f"[get_price] {tkr} error: {e}")
-        cached_price, _ = _cached_market_price(tkr)
+        cached_price, _ = _cached_market_price(tkr, snapshot)
         return cached_price if cached_price > 0 else 0.0
 
 
@@ -737,8 +810,10 @@ def get_close_history(ticker, _refresh_token=None, days=200):
 
 def build_agent_context(ticker, goals=None):
     """Shared live price + history context for the multi-agent orchestrator."""
-    live_price = get_price(ticker)
-    close_prices = get_close_history(ticker, _refresh_token=st.session_state.get("price_refresh_token"))
+    token = st.session_state.get("price_refresh_token")
+    force_live = st.session_state.get("_price_force_live", False)
+    live_price = get_price(ticker, _refresh_token=token, _force_live=force_live)
+    close_prices = get_close_history(ticker, _refresh_token=token)
     analyst_target = None
     try:
         info = yf.Ticker(ticker).info
@@ -1001,8 +1076,9 @@ def _cached_ticker_info(ticker, _refresh_token=None, _has_finnhub=False):
     return fetch_ticker_info(ticker, finnhub_client=FINNHUB_CLIENT)
 
 
-def get_fundamentals(ticker, _refresh_token=None):
-    """Tab 6 fundamentals — multi-source merge (yfinance + Finnhub + cache + history)."""
+@st.cache_data(ttl=600)
+def get_fundamentals(ticker, _refresh_token=None, _fundamentals_refresh_token=0, live_price=False):
+    """Tab 6 fundamentals — cached by default; live_price=True on explicit refresh."""
     if os.environ.get("EFA_CI_MODE") == "1":
         return build_fundamentals_row(
             ticker,
@@ -1022,17 +1098,23 @@ def get_fundamentals(ticker, _refresh_token=None):
     has_fh = FINNHUB_CLIENT is not None
     info = _cached_ticker_info(ticker, _refresh_token, has_fh)
     price, price_source = 0.0, ""
+    tkr = str(ticker).upper().strip()
     try:
-        price, price_source = get_price_with_source(ticker)
+        if live_price:
+            force_live = st.session_state.get("_price_force_live", False)
+            price, price_source = get_price_with_source(
+                tkr,
+                price=get_price(tkr, _refresh_token=_refresh_token, _force_live=force_live),
+            )
+        else:
+            meta = _ensure_last_prices_snapshot().get(tkr, {})
+            price = _acceptable_cached_price(meta)
+            if price > 0:
+                price_source = format_price_source_label(price, meta)
     except Exception as e:
-        print(f"[get_fundamentals] get_price_with_source({ticker}): {e}")
-        try:
-            price = get_price(ticker, _refresh_token=_refresh_token)
-            price_source = "get_price fallback"
-        except Exception as e2:
-            print(f"[get_fundamentals] get_price({ticker}): {e2}")
+        print(f"[get_fundamentals] price({ticker}): {e}")
     row = build_fundamentals_row(ticker, info, price, price_source)
-    if fundamentals_row_is_healthy(row) and not fundamentals_row_has_core_data(row):
+    if live_price and fundamentals_row_is_healthy(row) and not fundamentals_row_has_core_data(row):
         info = fetch_ticker_info(ticker, finnhub_client=FINNHUB_CLIENT, use_cache=True)
         row = build_fundamentals_row(ticker, info, price, price_source)
     return row
@@ -1210,15 +1292,41 @@ except Exception:
     st.session_state.market_is_open = False
     st.session_state.market_status = "🔴 Market status unavailable — using best available prices"
 
-# ====================== PORTFOLIO SUMMARY CALCULATIONS (safe version) ======================
-purge_invalid_price_cache()
+# ====================== PORTFOLIO SUMMARY CALCULATIONS (cache-first, holdings only) ======================
+if not st.session_state.get("_price_cache_purged"):
+    purge_invalid_price_cache()
+    st.session_state._price_cache_purged = True
+    st.session_state._last_prices_snapshot_dirty = True
+
+_price_snapshot = _ensure_last_prices_snapshot()
 _refresh_token = st.session_state.get("price_refresh_token")
-_tracked_tickers = get_all_tracked_tickers()
-prices = {ticker: get_price(ticker, _refresh_token=_refresh_token) for ticker in _tracked_tickers}
+_force_live = st.session_state.get("_price_force_live", False)
+
+# Header NAV uses cached memory only — no live API on routine reruns
+prices = {}
+for _ticker in holdings.keys():
+    _meta = _price_snapshot.get(str(_ticker).upper().strip(), {})
+    prices[_ticker] = _acceptable_cached_price(_meta)
+
 total_market_value = sum(h["qty"] * prices.get(t, 0.0) for t, h in holdings.items())
 total_cost_basis = sum(h["cost_basis"] for h in holdings.values())
 overall_return = ((total_market_value / total_cost_basis) - 1) * 100 if total_cost_basis > 0 else 0.0
 total_current_cash = sum(m.get("total_contributed", 0.0) - m.get("total_invested", 0.0) for m in data.get("members", []))
+
+# Warm holdings prices for Tab 2 (cache-first; live only when stale or Force Refresh)
+for _ticker in holdings.keys():
+    _meta = _price_snapshot.get(str(_ticker).upper().strip(), {})
+    if (
+        _force_live
+        or prices.get(_ticker, 0.0) <= 0
+        or not _cache_fresh_enough(_meta, force_live=_force_live)
+    ):
+        prices[_ticker] = get_price(
+            _ticker, _refresh_token=_refresh_token, _force_live=_force_live
+        )
+flush_pending_last_prices()
+if _force_live:
+    st.session_state._price_force_live = False
 
 # ====================== LAYOUT: BIBLE + PORTFOLIO SUMMARY ======================
 col_bible, col_summary = st.columns([3, 1])
@@ -1496,11 +1604,14 @@ with tab2:
             if "price_refresh_token" not in st.session_state:
                 st.session_state.price_refresh_token = 0
             st.session_state.price_refresh_token += 1
+            st.session_state._price_force_live = True
+            st.session_state._last_prices_snapshot_dirty = True
             try:
                 get_price.clear()
             except Exception:
                 pass
             clear_price_cache(get_all_tracked_tickers())
+            _invalidate_last_prices_snapshot()
             try:
                 get_fundamentals.clear()
             except Exception:
@@ -1515,8 +1626,8 @@ with tab2:
         cost_basis = h["cost_basis"]
         avg_price = cost_basis / qty if qty > 0 else 0
 
-        # Use diagnostic version so we can show the user exactly where the price came from
-        live_price, price_source = get_price_with_source(ticker)
+        live_price = prices.get(ticker, 0.0)
+        _, price_source = get_price_with_source(ticker, price=live_price)
 
         market_value = qty * live_price
         unrealized = market_value - cost_basis
@@ -1793,16 +1904,17 @@ with tab4:
             st.subheader("✏️ Manual Allocation Editor")
             st.caption("Admin only — adjust how a transaction is split between members.")
 
-            txn_options = []
-            for i, txn in enumerate(data["transactions"]):
-                label = f"{txn.get('date')} | {txn.get('type', 'Unknown')} | {txn.get('ticker', '')} | ${abs(txn.get('amount', 0)):,.2f}"
-                txn_options.append((label, i))
+            txn_options = [
+                (format_transaction_option_label(txn, i), i)
+                for i, txn in enumerate(data["transactions"])
+            ]
 
             if txn_options:
                 selected_label, real_idx = st.selectbox(
                     "Select transaction to edit allocation",
                     options=txn_options,
                     format_func=lambda x: x[0],
+                    key="alloc_txn_select",
                 )
 
                 selected_txn = data["transactions"][real_idx]
@@ -1846,6 +1958,60 @@ with tab4:
                             st.rerun()
                         else:
                             st.error(f"Save failed: {get_last_supabase_error()}")
+
+                st.markdown("---")
+                st.subheader("🗑️ Delete Transaction")
+                st.caption(
+                    "Admin only — remove one mistaken row after you review it. "
+                    "If you delete the wrong line, re-append from your IBKR CSV."
+                )
+
+                with st.form(key="delete_transaction_form"):
+                    delete_label, delete_idx = st.selectbox(
+                        "Select transaction to delete",
+                        options=txn_options,
+                        format_func=lambda x: x[0],
+                        key="delete_txn_select",
+                    )
+                    txn_pending_delete = data["transactions"][delete_idx]
+                    st.markdown(
+                        f"**Row:** {delete_label}  \n"
+                        f"**Quantity:** {txn_pending_delete.get('quantity', '—')} · "
+                        f"**Price:** ${float(txn_pending_delete.get('price', 0) or 0):,.4f} · "
+                        f"**Commission:** ${float(txn_pending_delete.get('commission', 0) or 0):,.2f}  \n"
+                        f"**Notes:** {txn_pending_delete.get('notes', '') or '—'}"
+                    )
+                    confirm_delete = st.checkbox(
+                        "I have reviewed this row and want to permanently remove it",
+                        key="confirm_delete_txn",
+                    )
+                    if st.form_submit_button("Delete this transaction", type="primary"):
+                        if not confirm_delete:
+                            st.error("Please check the confirmation box before deleting.")
+                        else:
+                            try:
+                                remaining, removed = delete_transaction_at(
+                                    data["transactions"], delete_idx
+                                )
+                            except IndexError:
+                                st.error("That transaction row is no longer available. Refresh and try again.")
+                            else:
+                                data["transactions"] = remaining
+                                if save_transactions(data["transactions"]):
+                                    auto_allocate_transactions()
+                                    data["transactions"] = load_transactions()
+                                    removed_label = format_transaction_option_label(
+                                        removed, delete_idx
+                                    )
+                                    st.success(
+                                        f"✅ Deleted {removed_label}. "
+                                        f"Holdings and member totals were recalculated. "
+                                        f"Re-append from CSV if this was a mistake."
+                                    )
+                                    st.rerun()
+                                else:
+                                    data["transactions"] = load_transactions()
+                                    st.error(f"Save failed: {get_last_supabase_error()}")
             else:
                 st.info("No transactions available to edit.")
     else:
@@ -1921,15 +2087,38 @@ with tab6:
         "FCF (B)": st.column_config.TextColumn("FCF (B)"),
     }
 
-    # ====================== FUNDAMENTALS TABLES ======================
+    # ====================== FUNDAMENTALS TABLES (lazy — not loaded on every rerun) ======================
     if all_tickers:
         st.markdown("### 📊 Fundamentals & Technicals")
         st.caption(
-            "Prices from Yahoo chart API (Tab 2). Fundamentals merge yfinance + Finnhub + 7-day Supabase cache. "
-            "If Industry/Target show N/A on Render, confirm FINNHUB_API_KEY is set, then click Force Refresh on Tab 2."
+            "Load on demand to save memory on Render. Cached prices from Tab 2 / last_prices; "
+            "fundamentals from 7-day Supabase cache. Use Refresh for live API pull."
         )
         if FINNHUB_CLIENT is None:
             st.warning("FINNHUB_API_KEY not set — Tab 6 fundamentals may show N/A on cloud when yfinance rate-limits.")
+
+        _load_col, _refresh_col = st.columns([1, 1])
+        with _load_col:
+            if st.button("📊 Load Fundamentals", type="primary", key="tab6_load_fundamentals"):
+                st.session_state.tab6_fundamentals_loaded = True
+                st.rerun()
+        with _refresh_col:
+            if st.button("🔄 Refresh Fundamentals (live)", key="tab6_refresh_fundamentals"):
+                st.session_state.tab6_fundamentals_loaded = True
+                st.session_state.fundamentals_refresh_token = (
+                    st.session_state.get("fundamentals_refresh_token", 0) + 1
+                )
+                st.session_state._tab6_live_refresh = True
+                st.session_state._price_force_live = True
+                try:
+                    _cached_ticker_info.clear()
+                except Exception:
+                    pass
+                try:
+                    get_fundamentals.clear()
+                except Exception:
+                    pass
+                st.rerun()
 
         if st.session_state.get("is_admin", False):
             with st.expander("🔧 Admin: Validate data sources", expanded=False):
@@ -1961,14 +2150,43 @@ with tab6:
                     st.success("Fundamentals cache cleared — next Tab 6 load will refetch.")
                     st.rerun()
 
-        if portfolio_tickers:
-            st.markdown("#### Portfolio Holdings")
+        if st.session_state.get("tab6_fundamentals_loaded"):
             _ftoken = st.session_state.get("price_refresh_token")
-            st.dataframe(pd.DataFrame([get_fundamentals(t, _refresh_token=_ftoken) for t in portfolio_tickers]), column_config=fundamentals_column_config, width="stretch", hide_index=True)
-        if watchlist_tickers:
-            st.markdown("#### Watchlist")
-            _ftoken = st.session_state.get("price_refresh_token")
-            st.dataframe(pd.DataFrame([get_fundamentals(t, _refresh_token=_ftoken) for t in watchlist_tickers]), column_config=fundamentals_column_config, width="stretch", hide_index=True)
+            _fund_tok = st.session_state.get("fundamentals_refresh_token", 0)
+            _live_fund = st.session_state.get("_tab6_live_refresh", False)
+            _fund_rows = {
+                t: get_fundamentals(
+                    t,
+                    _refresh_token=_ftoken,
+                    _fundamentals_refresh_token=_fund_tok,
+                    live_price=_live_fund,
+                )
+                for t in all_tickers
+            }
+            if st.session_state.pop("_tab6_live_refresh", None):
+                flush_pending_last_prices()
+
+            _portfolio_rows = [_fund_rows[t] for t in portfolio_tickers if t in _fund_rows]
+            _watchlist_rows = [_fund_rows[t] for t in watchlist_tickers if t in _fund_rows]
+
+            if _portfolio_rows:
+                st.markdown("#### Portfolio Holdings")
+                st.dataframe(
+                    pd.DataFrame(_portfolio_rows),
+                    column_config=fundamentals_column_config,
+                    width="stretch",
+                    hide_index=True,
+                )
+            if _watchlist_rows:
+                st.markdown("#### Watchlist")
+                st.dataframe(
+                    pd.DataFrame(_watchlist_rows),
+                    column_config=fundamentals_column_config,
+                    width="stretch",
+                    hide_index=True,
+                )
+        else:
+            st.info("Click **Load Fundamentals** to view cached data (no API calls until you refresh).")
 
     # ====================== GROK ANALYSIS ======================
     st.markdown("### 🔍 Grok Qualitative Analysis Summary")
@@ -2963,6 +3181,10 @@ with tab9:
     with col2:
         if st.button("🔄 Refresh Price Cache (used by Holdings)", type="secondary"):
             with st.spinner("Clearing price caches and pre-warming..."):
+                st.session_state._price_force_live = True
+                if "price_refresh_token" not in st.session_state:
+                    st.session_state.price_refresh_token = 0
+                st.session_state.price_refresh_token += 1
                 try:
                     get_price.clear()
                 except Exception:
@@ -2970,15 +3192,18 @@ with tab9:
                 portfolio_holdings = st.session_state.get("portfolio_holdings") or list(holdings.keys())
                 watchlist = st.session_state.get("watchlist", [])
                 all_tickers = list(set(portfolio_holdings + watchlist))
-                
+                _token = st.session_state.get("price_refresh_token")
+
                 warmed = 0
                 for t in all_tickers:
                     try:
-                        p = get_price(t)  # will hit live path + update last_prices.json
+                        p = get_price(t, _refresh_token=_token, _force_live=True)
                         if p > 0:
                             warmed += 1
                     except Exception as e:
                         print(f"Price warm-up failed for {t}: {e}")
+                flush_pending_last_prices()
+                st.session_state._price_force_live = False
                 st.success(f"✅ Cleared Streamlit cache + warmed prices for {warmed}/{len(all_tickers)} tickers. Check Tab 2.")
 
     latest_portfolio = get_latest_analysis_run(st.session_state.analysis_history, "Portfolio")

@@ -502,6 +502,87 @@ def fundamentals_row_has_extended_data(row):
     return any(row.get(c) not in (None, "", "N/A") for c in extended_cols)
 
 
+PRICE_INTRADAY_TTL_MINUTES = 15
+
+
+def parse_price_meta_timestamp(ts_str):
+    ts = str(ts_str or "").strip().split(" (")[0].strip()
+    if not ts:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(ts, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def acceptable_cached_price(meta, session, *, today, target_eod, prior_eod):
+    """Pure session-aware cached price selection (never csv_fill)."""
+    if not meta:
+        return 0.0
+    price = float(meta.get("price", 0) or 0)
+    if price <= 0 or str(meta.get("source", "")).lower() == "csv_fill":
+        return 0.0
+
+    src = str(meta.get("source", "")).lower()
+    as_of = str(meta.get("as_of", "") or "")
+
+    if session == "open":
+        if src == "intraday" and as_of == today:
+            return price
+        if src == "eod_close" and as_of in (prior_eod, target_eod):
+            return price
+        return price
+
+    if src == "eod_close" and (as_of == target_eod or not as_of):
+        return price
+    if session in ("premarket", "afterhours", "weekend") and price > 0:
+        return price
+    return 0.0
+
+
+def format_transaction_option_label(txn, index):
+    """Human-readable label for admin transaction pickers (1-based row number)."""
+    txn = txn or {}
+    amount = abs(float(txn.get("amount", 0) or 0))
+    return (
+        f"#{index + 1} · {txn.get('date', 'N/A')} · {txn.get('type', 'Unknown')} · "
+        f"{txn.get('ticker', '')} · ${amount:,.2f}"
+    )
+
+
+def delete_transaction_at(transactions, index):
+    """Return (remaining_list, removed_txn). Raises IndexError if index invalid."""
+    if not isinstance(transactions, list):
+        raise IndexError("transactions must be a list")
+    if index < 0 or index >= len(transactions):
+        raise IndexError(f"transaction index out of range: {index}")
+    removed = transactions[index]
+    remaining = transactions[:index] + transactions[index + 1:]
+    return remaining, removed
+
+
+def cache_fresh_enough(meta, session, *, force_live=False, intraday_ttl_minutes=PRICE_INTRADAY_TTL_MINUTES,
+                       today=None, target_eod=None, prior_eod=None):
+    """True when live API can be skipped for this cached entry."""
+    if force_live:
+        return False
+    if acceptable_cached_price(meta, session, today=today, target_eod=target_eod, prior_eod=prior_eod) <= 0:
+        return False
+
+    src = str(meta.get("source", "")).lower()
+    updated = parse_price_meta_timestamp(meta.get("timestamp", ""))
+
+    if session == "open" and src == "intraday":
+        if updated is None:
+            return True
+        age_min = (datetime.now() - updated).total_seconds() / 60.0
+        return age_min <= intraday_ttl_minutes
+
+    return True
+
+
 def _probe_fields(data, fields):
     """Return comma-separated field names that have non-empty values."""
     found = []
