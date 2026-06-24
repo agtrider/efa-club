@@ -1966,24 +1966,28 @@ with tab4:
                     "If you delete the wrong line, re-append from your IBKR CSV."
                 )
 
+                # Selectbox must stay OUTSIDE st.form — form widgets do not rerun on change,
+                # so details would stay frozen on row #1 while the dropdown shows another row.
+                delete_label, delete_idx = st.selectbox(
+                    "Select transaction to delete",
+                    options=txn_options,
+                    format_func=lambda x: x[0],
+                    key="delete_txn_select",
+                )
+                txn_pending_delete = data["transactions"][delete_idx]
+                st.markdown(
+                    f"**Row:** {delete_label}  \n"
+                    f"**Quantity:** {txn_pending_delete.get('quantity', '—')} · "
+                    f"**Price:** ${float(txn_pending_delete.get('price', 0) or 0):,.4f} · "
+                    f"**Commission:** ${float(txn_pending_delete.get('commission', 0) or 0):,.2f}  \n"
+                    f"**Notes:** {txn_pending_delete.get('notes', '') or '—'}"
+                )
+
                 with st.form(key="delete_transaction_form"):
-                    delete_label, delete_idx = st.selectbox(
-                        "Select transaction to delete",
-                        options=txn_options,
-                        format_func=lambda x: x[0],
-                        key="delete_txn_select",
-                    )
-                    txn_pending_delete = data["transactions"][delete_idx]
-                    st.markdown(
-                        f"**Row:** {delete_label}  \n"
-                        f"**Quantity:** {txn_pending_delete.get('quantity', '—')} · "
-                        f"**Price:** ${float(txn_pending_delete.get('price', 0) or 0):,.4f} · "
-                        f"**Commission:** ${float(txn_pending_delete.get('commission', 0) or 0):,.2f}  \n"
-                        f"**Notes:** {txn_pending_delete.get('notes', '') or '—'}"
-                    )
+                    st.caption(f"You are about to delete: **{delete_label}**")
                     confirm_delete = st.checkbox(
                         "I have reviewed this row and want to permanently remove it",
-                        key="confirm_delete_txn",
+                        key=f"confirm_delete_txn_{delete_idx}",
                     )
                     if st.form_submit_button("Delete this transaction", type="primary"):
                         if not confirm_delete:
