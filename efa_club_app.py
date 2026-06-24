@@ -1437,7 +1437,13 @@ if st.session_state.is_admin and st.sidebar.button("🔄 Refresh Data from Supab
     data["members"] = load_members()
     data["transactions"] = load_transactions()
     auto_allocate_transactions()
-    st.success("✅ Data refreshed from Supabase")
+    st.session_state.meeting_proposals = load_polls()
+    raw_av = load_availability_responses()
+    st.session_state.availability_responses = normalize_availability_responses(
+        raw_av, st.session_state.meeting_proposals
+    )
+    st.session_state.finalized_meetings = load_finalized_meetings()
+    st.success("✅ Data refreshed from Supabase (members, transactions, meetings, polls)")
     st.rerun()
 
 if st.sidebar.button("Logout", key="logout_btn"):
@@ -2364,37 +2370,35 @@ with tab7:
     st.subheader("📅 Meeting Scheduler")
     st.caption("All data (polls, availability, finalized meetings) persists in Supabase")
 
-    # Robust loading at the start of the tab
-    if "meeting_proposals" not in st.session_state:
-        st.session_state.meeting_proposals = load_polls()
-    if "availability_responses" not in st.session_state:
-        raw_av = load_availability_responses()
-        st.session_state.availability_responses = normalize_availability_responses(
-            raw_av, st.session_state.meeting_proposals
-        )
-        # Persist migration immediately so Supabase has the new per-poll structure
+    # Reload scheduler data from Supabase every rerun so votes/polls stay current for all members.
+    st.session_state.meeting_proposals = load_polls()
+    raw_av = load_availability_responses()
+    if not st.session_state.get("_scheduler_av_migrated"):
         sample = next(iter(raw_av.values()), None) if raw_av else None
         if raw_av and isinstance(sample, (list, tuple)):
+            migrated = normalize_availability_responses(raw_av, st.session_state.meeting_proposals)
             print("[MIGRATION] Old flat availability_responses detected. Migrated to per-poll format and saved to Supabase.")
             print("[MIGRATION] Proposals at migration time:", [p.get("id") for p in st.session_state.meeting_proposals])
-            # Safety: also stash the original flat data under a legacy key in case recovery is ever needed.
             try:
                 if supabase is not None:
                     current = supabase.table("club_data").select("data").eq("id", 1).execute()
                     data_dict = current.data[0].get("data", {}) if current.data else {}
                     data_dict["availability_responses_legacy"] = raw_av
-                    data_dict["availability_responses"] = st.session_state.availability_responses
+                    data_dict["availability_responses"] = migrated
                     supabase.table("club_data").upsert({"id": 1, "data": data_dict}).execute()
                     print("[MIGRATION] Legacy flat copy saved under 'availability_responses_legacy' key.")
                 else:
-                    save_availability_responses(st.session_state.availability_responses)
+                    save_availability_responses(migrated)
             except Exception as e:
                 print("[MIGRATION] Extra legacy backup failed, doing normal save:", e)
-                save_availability_responses(st.session_state.availability_responses)
-    if "finalized_meetings" not in st.session_state:
-        st.session_state.finalized_meetings = load_finalized_meetings()
+                save_availability_responses(migrated)
+            raw_av = migrated
+        st.session_state._scheduler_av_migrated = True
+    st.session_state.availability_responses = normalize_availability_responses(
+        raw_av, st.session_state.meeting_proposals
+    )
+    st.session_state.finalized_meetings = load_finalized_meetings()
 
-    # Safety: ensure availability_responses is always a dict (new per-poll shape)
     if not isinstance(st.session_state.get("availability_responses"), dict):
         st.session_state.availability_responses = {}
 
