@@ -908,6 +908,44 @@ def _vote_index(meeting, vote_id):
     return None
 
 
+def find_meeting_index(meetings, meeting_id):
+    mid = safe_int(meeting_id)
+    if mid is None:
+        return None
+    for idx, meeting in enumerate(meetings or []):
+        if safe_int((meeting or {}).get("id")) == mid:
+            return idx
+    return None
+
+
+def merge_meeting_vote_ballots(fresh_meeting, updated_meeting):
+    """
+    Union ballot entries per vote id so concurrent member votes are not lost.
+    updated_meeting controls vote list structure; patch ballots win on same username.
+    """
+    fresh = normalize_meeting_votes(dict(fresh_meeting or {}))
+    updated = normalize_meeting_votes(dict(updated_meeting or {}))
+    fresh_by_id = {
+        safe_int(v.get("id")): normalize_vote_item(v)
+        for v in fresh.get("votes", [])
+        if safe_int(v.get("id"))
+    }
+
+    merged_votes = []
+    for vote in updated.get("votes", []):
+        v = normalize_vote_item(vote)
+        vid = safe_int(v.get("id"))
+        if vid and vid in fresh_by_id:
+            ballot = dict(get_vote_ballot(fresh_by_id[vid]))
+            ballot.update(get_vote_ballot(v))
+            v["votes"] = ballot
+        merged_votes.append(v)
+
+    out = dict(updated_meeting or {})
+    out["votes"] = merged_votes
+    return normalize_meeting_record(out)
+
+
 def _sync_meeting_votes(meeting):
     normalized = normalize_meeting_votes(meeting)
     meeting.clear()
@@ -915,10 +953,10 @@ def _sync_meeting_votes(meeting):
     return meeting
 
 
-def _persist_vote_change(meeting_id, updater):
+def _persist_vote_change(meeting_id, updater, verify=None):
     from efa_club_meetings import persist_meeting_update
 
-    return persist_meeting_update(meeting_id, updater)
+    return persist_meeting_update(meeting_id, updater, verify=verify)
 
 
 def persist_create_vote(meeting_id, question):
@@ -945,6 +983,8 @@ def persist_create_vote(meeting_id, question):
 
 
 def persist_member_vote(meeting_id, vote_id, username, choice):
+    choice = str(choice).strip()
+
     def updater(meeting):
         _sync_meeting_votes(meeting)
         vote_idx = _vote_index(meeting, vote_id)
@@ -952,7 +992,16 @@ def persist_member_vote(meeting_id, vote_id, username, choice):
             return False, "Vote not found."
         return record_member_vote(meeting["votes"][vote_idx], username, choice)
 
-    return _persist_vote_change(meeting_id, updater)
+    def verify(reloaded):
+        midx = find_meeting_index(reloaded, meeting_id)
+        if midx is None:
+            return False
+        vidx = _vote_index(reloaded[midx], vote_id)
+        if vidx is None:
+            return False
+        return member_vote_choice(reloaded[midx]["votes"][vidx], username) == choice
+
+    return _persist_vote_change(meeting_id, updater, verify=verify)
 
 
 def persist_admin_vote_question(meeting_id, vote_id, question):

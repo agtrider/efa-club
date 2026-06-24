@@ -84,29 +84,58 @@ def add_meeting_attachment(meeting, uploaded_file, username):
     return True, ""
 
 
-def persist_meeting_update(meeting_id, updater):
+def persist_meeting_update(meeting_id, updater, verify=None):
     """
     Reload meetings from storage, apply updater(meeting) -> (ok, message), then save.
+    Merges vote ballots with a fresh read before save to survive concurrent end-of-meeting votes.
     Returns (ok, message, refreshed_meetings_or_none).
     """
+    import time
+
+    from efa_club_services import find_meeting_index, merge_meeting_vote_ballots
+
     if not meeting_id:
         return False, "Meeting is missing an id.", None
 
-    meetings = load_finalized_meetings()
-    meeting_idx = next((i for i, m in enumerate(meetings) if m.get("id") == meeting_id), None)
-    if meeting_idx is None:
-        return False, "Meeting not found.", None
+    max_attempts = 3
+    for attempt in range(max_attempts):
+        meetings = load_finalized_meetings()
+        meeting_idx = find_meeting_index(meetings, meeting_id)
+        if meeting_idx is None:
+            return False, "Meeting not found.", None
 
-    meeting = meetings[meeting_idx]
-    ok, msg = updater(meeting)
-    if not ok:
-        return False, msg, None
+        meeting = dict(meetings[meeting_idx])
+        ok, msg = updater(meeting)
+        if not ok:
+            return False, msg, None
 
-    meetings[meeting_idx] = meeting
-    if not save_finalized_meetings(meetings):
-        return False, get_last_supabase_error() or "Failed to save meeting.", None
+        fresh_meetings = load_finalized_meetings()
+        fresh_idx = find_meeting_index(fresh_meetings, meeting_id)
+        if fresh_idx is None:
+            return False, "Meeting not found.", None
 
-    return True, msg, load_finalized_meetings()
+        fresh_meetings[fresh_idx] = merge_meeting_vote_ballots(
+            fresh_meetings[fresh_idx], meeting
+        )
+        if not save_finalized_meetings(fresh_meetings):
+            if attempt < max_attempts - 1:
+                time.sleep(0.05 * (attempt + 1))
+                continue
+            return False, get_last_supabase_error() or "Failed to save meeting.", None
+
+        reloaded = load_finalized_meetings()
+        if verify is not None and not verify(reloaded):
+            if attempt < max_attempts - 1:
+                time.sleep(0.05 * (attempt + 1))
+                continue
+            return (
+                False,
+                "Could not confirm your vote was saved after concurrent updates. Please submit again.",
+                None,
+            )
+        return True, msg, reloaded
+
+    return False, "Failed to save meeting after retries.", None
 
 
 def persist_meeting_attachment(meeting_id, uploaded_file, username):
