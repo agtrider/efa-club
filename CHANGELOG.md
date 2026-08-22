@@ -1,5 +1,19 @@
 # EFA Investment Club — Changelog
 
+## 2026-08-22 — Stock Assessment + Kelly + LOGOS; auto last-print prices
+
+**Files:** `efa_club_app.py`, `efa_club_services.py`, `efa_club_persistence.py`, `efa_club_kelly.py`, `efa_club_research.py`, `efa_club_logos.py`, `EFA - Kelly Formula.xlsx`, `requirements.txt`, tests
+
+### Summary
+- **Tab 10 — Stock Assessment + Kelly:** Grok 18-point public-company memo plus in-app half-Kelly matrix from the club workbook. Timestamped PDF/HTML download. Saved runs expand at the bottom like Tab 6.
+- **LOGOS — What is true?:** Seven-section memo (Logos, Direction, Execution, Valuation, Market structure, Stewardship, Kelly). Reuses assessment + Kelly numbers. Timestamped PDF and collapsible saved history.
+- **Live prices:** Quotes refresh automatically while the US market is open. After hours / weekend the app loads the last regular-session print without Force Refresh. Cache no longer treats yesterday’s close as fresh during RTH.
+- **Printable template** on Tab 10 is collapsed by default.
+
+**After deploy:** Log in on Render → last tab **Stock Assessment + Kelly**. Tab 2 should show last prints after hours without clicking Force Refresh.
+
+---
+
 ## 2026-06-18 — Persistence hardening + admin gating
 
 **Full detail:** see [CHANGELOG-2026-06-18.md](CHANGELOG-2026-06-18.md)

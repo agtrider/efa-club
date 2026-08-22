@@ -64,6 +64,7 @@ from efa_club_persistence import (
     save_watchlist,
     supabase,
 )
+from efa_club_research import render_stock_assessment_tab
 from efa_club_services import (
     PRICE_INTRADAY_TTL_MINUTES,
     acceptable_cached_price,
@@ -121,9 +122,18 @@ else:
     st.sidebar.error("❌ Supabase NOT Connected (running local only)")
 
 # ====================== FINNHUB CLIENT (for reliable current quotes - already used for news/filings in Tab 8) ======================
+def _resolve_secret(name):
+    val = os.environ.get(name)
+    if val:
+        return val
+    try:
+        return st.secrets.get(name)
+    except Exception:
+        return None
+
 FINNHUB_CLIENT = None
 try:
-    _fh_key = os.environ.get("FINNHUB_API_KEY")
+    _fh_key = _resolve_secret("FINNHUB_API_KEY")
     if _fh_key:
         import finnhub
         FINNHUB_CLIENT = finnhub.Client(api_key=_fh_key)
@@ -333,56 +343,63 @@ def get_market_session():
         return "afterhours"
 
 
+def _yahoo_last_print_from_chart(res, target_eod):
+    """Last regular-session print from a Yahoo chart result (daily or 1m)."""
+    if not res:
+        return 0.0
+    meta = res.get("meta") or {}
+    ts, closes = _chart_closes(res)
+    price = _close_on_date(ts, closes, target_eod)
+    if price <= 0:
+        price = _meta_price(meta, "regularMarketPrice")
+    if price <= 0:
+        price = _meta_price(meta, "chartPreviousClose", "previousClose", "regularMarketPreviousClose")
+    if price <= 0:
+        price = _last_bar_close(ts, closes)
+    return price
+
+
 def fetch_yahoo_session_price(tkr, session=None, target_eod=None):
     """
     Session-aware price from Yahoo chart API (no yfinance dependency).
-    This is the primary path — works locally and on Render where yfinance often rate-limits.
+    Open: latest regular-session trade.
+    Closed: last available print (regular-session close / last print), not $0.
     """
     session = session or get_market_session()
     target_eod = target_eod or get_last_trading_day_str()
 
     if session == "open":
-        res = _yahoo_chart_request(tkr, {"interval": "1m", "range": "1d"})
+        res = _yahoo_chart_request(
+            tkr, {"interval": "1m", "range": "1d", "includePrePost": "false"}
+        )
         if res:
             meta = res.get("meta") or {}
-            price = _meta_price(meta, "regularMarketPrice", "previousClose", "chartPreviousClose")
+            price = _meta_price(meta, "regularMarketPrice")
             if price <= 0:
                 ts, closes = _chart_closes(res)
                 price = _last_bar_close(ts, closes)
             if price > 0:
                 return price, " (yahoo chart live)"
 
-    # Closed sessions: daily bars pinned to the target trading day
-    res = _yahoo_chart_request(tkr, {"interval": "1d", "range": "1mo"})
-    if res:
-        meta = res.get("meta") or {}
-        ts, closes = _chart_closes(res)
-        price = _close_on_date(ts, closes, target_eod)
+    # Closed: last available regular-session print for the last trading day.
+    # Daily bars can lag a few minutes after 16:00 ET, so 1m last print is the backup.
+    daily = _yahoo_chart_request(
+        tkr, {"interval": "1d", "range": "5d", "includePrePost": "false"}
+    )
+    price = _yahoo_last_print_from_chart(daily, target_eod)
+    if price <= 0:
+        minute = _yahoo_chart_request(
+            tkr, {"interval": "1m", "range": "1d", "includePrePost": "false"}
+        )
+        price = _yahoo_last_print_from_chart(minute, target_eod)
 
-        if price <= 0 and session == "afterhours":
-            price = _meta_price(meta, "regularMarketPrice")
-
-        if price <= 0 and session in ("premarket", "weekend"):
-            price = _meta_price(
-                meta,
-                "chartPreviousClose",
-                "previousClose",
-                "regularMarketPreviousClose",
-            )
-
-        if price <= 0:
-            price = _meta_price(meta, "regularMarketPrice")
-
-        if price <= 0 and closes:
-            price = _last_bar_close(ts, closes)
-
-        if price > 0:
-            label = {
-                "premarket": "prior close",
-                "afterhours": "today close",
-                "weekend": "last session close",
-            }.get(session, "EOD")
-            return price, f" (yahoo chart {label} / {target_eod})"
+    if price > 0:
+        label = {
+            "premarket": "prior close",
+            "afterhours": "last print",
+            "weekend": "last session print",
+        }.get(session, "last print")
+        return price, f" (yahoo {label} / {target_eod})"
 
     return 0.0, ""
 
@@ -519,10 +536,10 @@ def format_price_source_label(price, meta):
             label = "Live (Yahoo chart)"
         elif "prior close" in ts.lower() or "premarket" in ts.lower():
             label = "Prior Close (Yahoo chart)"
-        elif "today close" in ts.lower() or "afterhours" in ts.lower():
-            label = "Today's Close (Yahoo chart)"
+        elif "last print" in ts.lower() or "today close" in ts.lower() or "afterhours" in ts.lower():
+            label = "Last print (regular close)"
         else:
-            label = "EOD Close (Yahoo chart)"
+            label = "Last print (Yahoo chart)"
         if as_of:
             label += f" — {as_of}"
         return label
@@ -569,9 +586,13 @@ if "analysis_history" not in st.session_state:
 # ====================== GROK API CLIENT ======================
 from openai import OpenAI
 
-if os.environ.get("GROK_API_KEY"):
+def _resolve_grok_api_key():
+    return _resolve_secret("GROK_API_KEY")
+
+_grok_key = _resolve_grok_api_key()
+if _grok_key:
     client = OpenAI(
-        api_key=os.environ.get("GROK_API_KEY"),
+        api_key=_grok_key,
         base_url="https://api.x.ai/v1"
     )
     st.success("✅ Grok API client initialized")
@@ -684,6 +705,10 @@ def get_last_trade_price(ticker):
         return 0.0
 
 
+def _price_generation():
+    return int(st.session_state.get("price_refresh_generation", 0) or 0)
+
+
 def get_price_with_source(ticker, price=None):
     """Returns (price, source_label) for Tab 2 diagnostics without redundant fetches."""
     tkr = str(ticker).upper().strip()
@@ -691,22 +716,25 @@ def get_price_with_source(ticker, price=None):
         return 0.0, "zero"
 
     if price is None:
-        token = st.session_state.get("price_refresh_token")
-        force_live = st.session_state.get("_price_force_live", False)
-        price = get_price(tkr, _refresh_token=token, _force_live=force_live)
+        price = get_price(
+            tkr,
+            refresh_generation=_price_generation(),
+            force_live=st.session_state.get("_price_force_live", False),
+        )
 
     meta = _ensure_last_prices_snapshot().get(tkr, {})
     return price, format_price_source_label(price, meta)
 
 
 # ====================== PRICE FETCHER - SESSION-AWARE MARKET PRICE ======================
-@st.cache_data(ttl=180)
-def get_price(ticker, _refresh_token=None, _force_live=False):
+@st.cache_data(ttl=60)
+def get_price(ticker, refresh_generation=0, force_live=False):
     """
     Cache-first market price:
-    - Uses in-memory last_prices when fresh for the current session
-    - Live fetch only when stale, missing, or Force Refresh (_force_live)
-    - If live fails: last cached price (never a purchase fill)
+    - Uses last_prices when fresh for this session (today's live quote, or last print after hours)
+    - Live fetch when stale/missing, auto-refresh, or Force Refresh
+    - If live fails: last cached print (never a purchase fill)
+    refresh_generation is part of the Streamlit cache key so auto-refresh actually busts.
     """
     tkr = str(ticker).upper().strip()
     if not tkr or tkr in ("CASH", "-"):
@@ -718,7 +746,7 @@ def get_price(ticker, _refresh_token=None, _force_live=False):
     snapshot = _ensure_last_prices_snapshot()
     meta = snapshot.get(tkr, {})
 
-    if _cache_fresh_enough(meta, session, force_live=_force_live):
+    if _cache_fresh_enough(meta, session, force_live=force_live):
         cached = _acceptable_cached_price(meta, session)
         if cached > 0:
             print(f"[get_price] {tkr}: CACHE_HIT ${cached:.2f}")
@@ -728,13 +756,15 @@ def get_price(ticker, _refresh_token=None, _force_live=False):
     source_note = ""
 
     try:
-        print(f"[get_price] {tkr}: LIVE_FETCH")
+        print(f"[get_price] {tkr}: LIVE_FETCH gen={refresh_generation} force={force_live}")
         final_price, source_note = fetch_yahoo_session_price(tkr, session=session, target_eod=target_eod)
 
         if final_price == 0:
             final_price, source_note = fetch_finnhub_quote(tkr)
             if final_price > 0 and is_open:
                 source_note = source_note.replace("quote", "live")
+            elif final_price > 0:
+                source_note = (source_note or " (finnhub)") + " last print"
 
         if final_price == 0:
             stock = yf.Ticker(tkr)
@@ -759,7 +789,11 @@ def get_price(ticker, _refresh_token=None, _force_live=False):
                     except Exception:
                         pass
             else:
-                final_price, source_note = fetch_eod_close(stock, tkr, target_eod)
+                final_price = _fast_info_price(fi, "regularMarketPrice", "lastPrice", "previousClose")
+                if final_price > 0:
+                    source_note = " (yfinance last print)"
+                if final_price == 0:
+                    final_price, source_note = fetch_eod_close(stock, tkr, target_eod)
 
         if final_price > 0:
             src_type = "intraday" if is_open else "eod_close"
@@ -774,7 +808,7 @@ def get_price(ticker, _refresh_token=None, _force_live=False):
 
         cached_price, _ = _cached_market_price(tkr, snapshot)
         if cached_price > 0:
-            print(f"[get_price] {tkr}: live fetch failed, using cached ${cached_price:.2f}")
+            print(f"[get_price] {tkr}: live fetch failed, using last print ${cached_price:.2f}")
             return cached_price
 
         print(f"[get_price] {tkr}: all sources failed; no cached market price available")
@@ -784,6 +818,95 @@ def get_price(ticker, _refresh_token=None, _force_live=False):
         print(f"[get_price] {tkr} error: {e}")
         cached_price, _ = _cached_market_price(tkr, snapshot)
         return cached_price if cached_price > 0 else 0.0
+
+
+def refresh_tracked_prices(tickers, *, force_live=False):
+    """Fetch market prices for holdings/watchlist. Dedupes two UI panels in the same second."""
+    originals = [
+        t for t in (tickers or [])
+        if t and str(t).upper().strip() not in ("CASH", "-")
+    ]
+    now_ts = datetime.now().timestamp()
+    bundle = st.session_state.get("_price_bundle") or {}
+    same = list(bundle.get("tickers") or []) == originals
+    age = now_ts - float(bundle.get("ts") or 0)
+    if same and bundle.get("prices") and age < 20 and (not force_live or age < 20):
+        return bundle["prices"]
+
+    gen = _price_generation()
+    out = {}
+    for orig in originals:
+        tkr = str(orig).upper().strip()
+        price = get_price(tkr, refresh_generation=gen, force_live=force_live)
+        out[orig] = price
+        out[tkr] = price
+    flush_pending_last_prices()
+    st.session_state._price_bundle = {"ts": now_ts, "tickers": originals, "prices": out}
+    if force_live:
+        st.session_state._price_force_live = False
+    return out
+
+
+PRICE_AUTO_REFRESH_SECONDS = 60
+
+
+def _live_price_interval():
+    """Poll during RTH only. After hours we keep the last print until the next open."""
+    return PRICE_AUTO_REFRESH_SECONDS if get_market_session() == "open" else None
+
+
+def _bump_price_generation():
+    st.session_state.price_refresh_generation = _price_generation() + 1
+    st.session_state.price_refresh_token = st.session_state.price_refresh_generation
+    st.session_state._price_force_live = True
+    st.session_state._price_bundle = {}
+    st.session_state._last_prices_snapshot_dirty = True
+    try:
+        get_price.clear()
+    except Exception:
+        pass
+
+
+def _holdings_rows_from_prices(price_map):
+    rows = []
+    total_qty = total_cost = total_market = total_unrealized = 0.0
+    for ticker, h in holdings.items():
+        qty = h["qty"]
+        cost_basis = h["cost_basis"]
+        avg_price = cost_basis / qty if qty > 0 else 0
+        live_price = price_map.get(ticker, 0.0)
+        _, price_source = get_price_with_source(ticker, price=live_price)
+        market_value = qty * live_price
+        unrealized = market_value - cost_basis
+        pct_return = ((market_value / cost_basis) - 1) * 100 if cost_basis > 0 else 0
+        rows.append({
+            "Ticker": ticker,
+            "Quantity": round(qty, 4),
+            "Avg Purchase Price": f"${avg_price:,.4f}",
+            "Cost Basis": f"${cost_basis:,.2f}",
+            "Live Price": f"${live_price:,.2f}",
+            "Price Source": price_source,
+            "Market Value": f"${market_value:,.2f}",
+            "Unrealized Gain/Loss": f"${unrealized:,.2f}",
+            "% Return": f"{pct_return:.2f}%",
+        })
+        total_qty += qty
+        total_cost += cost_basis
+        total_market += market_value
+        total_unrealized += unrealized
+    total_pct_return = ((total_market / total_cost) - 1) * 100 if total_cost > 0 else 0
+    rows.append({
+        "Ticker": "**TOTAL**",
+        "Quantity": round(total_qty, 4),
+        "Avg Purchase Price": "—",
+        "Cost Basis": f"${total_cost:,.2f}",
+        "Live Price": "—",
+        "Price Source": "—",
+        "Market Value": f"${total_market:,.2f}",
+        "Unrealized Gain/Loss": f"${total_unrealized:,.2f}",
+        "% Return": f"{total_pct_return:.2f}%",
+    })
+    return rows, total_market
 
 
 @st.cache_data(ttl=300)
@@ -812,7 +935,11 @@ def build_agent_context(ticker, goals=None):
     """Shared live price + history context for the multi-agent orchestrator."""
     token = st.session_state.get("price_refresh_token")
     force_live = st.session_state.get("_price_force_live", False)
-    live_price = get_price(ticker, _refresh_token=token, _force_live=force_live)
+    live_price = get_price(
+        ticker,
+        refresh_generation=_price_generation(),
+        force_live=force_live,
+    )
     close_prices = get_close_history(ticker, _refresh_token=token)
     analyst_target = None
     try:
@@ -1058,7 +1185,7 @@ def get_technical_indicators(ticker, _refresh_token=None):
         bb_std = df['Close'].rolling(20).std().iloc[-1] if len(df) > 20 else None
         bb_upper = bb_mid + 2 * bb_std if bb_mid is not None and bb_std is not None else None
         bb_lower = bb_mid - 2 * bb_std if bb_mid is not None and bb_std is not None else None
-        market_price = get_price(ticker, _refresh_token=_refresh_token)
+        market_price = get_price(ticker, refresh_generation=_refresh_token or 0)
         return {
             "price": market_price if market_price > 0 else float(df['Close'].iloc[-1]),
             "rsi": float(rsi.iloc[-1]) if len(rsi) > 0 and not pd.isna(rsi.iloc[-1]) else None,
@@ -1104,7 +1231,11 @@ def get_fundamentals(ticker, _refresh_token=None, _fundamentals_refresh_token=0,
             force_live = st.session_state.get("_price_force_live", False)
             price, price_source = get_price_with_source(
                 tkr,
-                price=get_price(tkr, _refresh_token=_refresh_token, _force_live=force_live),
+                price=get_price(
+                    tkr,
+                    refresh_generation=_refresh_token or 0,
+                    force_live=force_live,
+                ),
             )
         else:
             meta = _ensure_last_prices_snapshot().get(tkr, {})
@@ -1285,9 +1416,9 @@ try:
     elif _session == "premarket":
         st.session_state.market_status = f"🟡 Pre-Market — showing prior close (**{_eod_day}**)"
     elif _session == "weekend":
-        st.session_state.market_status = f"🔴 Market Closed (Weekend) — using close for **{_eod_day}**"
+        st.session_state.market_status = f"🔴 Market Closed (Weekend) — last available print **{_eod_day}**"
     else:
-        st.session_state.market_status = f"🔴 After Hours — using today's close (**{_eod_day}**)"
+        st.session_state.market_status = f"🔴 After Hours — last available print (**{_eod_day}** regular close)"
 except Exception:
     st.session_state.market_is_open = False
     st.session_state.market_status = "🔴 Market status unavailable — using best available prices"
@@ -1299,34 +1430,37 @@ if not st.session_state.get("_price_cache_purged"):
     st.session_state._last_prices_snapshot_dirty = True
 
 _price_snapshot = _ensure_last_prices_snapshot()
-_refresh_token = st.session_state.get("price_refresh_token")
+if "price_refresh_generation" not in st.session_state:
+    st.session_state.price_refresh_generation = int(st.session_state.get("price_refresh_token", 0) or 0)
+_refresh_token = _price_generation()
 _force_live = st.session_state.get("_price_force_live", False)
 
-# Header NAV uses cached memory only — no live API on routine reruns
+# Seed from cache, then auto-fetch any ticker that is missing or stale for this session.
+# After hours this pulls the last available print; during RTH it pulls live quotes.
 prices = {}
+_need_fetch = []
 for _ticker in holdings.keys():
     _meta = _price_snapshot.get(str(_ticker).upper().strip(), {})
     prices[_ticker] = _acceptable_cached_price(_meta)
-
-total_market_value = sum(h["qty"] * prices.get(t, 0.0) for t, h in holdings.items())
-total_cost_basis = sum(h["cost_basis"] for h in holdings.values())
-overall_return = ((total_market_value / total_cost_basis) - 1) * 100 if total_cost_basis > 0 else 0.0
-total_current_cash = sum(m.get("total_contributed", 0.0) - m.get("total_invested", 0.0) for m in data.get("members", []))
-
-# Warm holdings prices for Tab 2 (cache-first; live only when stale or Force Refresh)
-for _ticker in holdings.keys():
-    _meta = _price_snapshot.get(str(_ticker).upper().strip(), {})
     if (
         _force_live
         or prices.get(_ticker, 0.0) <= 0
         or not _cache_fresh_enough(_meta, force_live=_force_live)
     ):
-        prices[_ticker] = get_price(
-            _ticker, _refresh_token=_refresh_token, _force_live=_force_live
-        )
-flush_pending_last_prices()
-if _force_live:
-    st.session_state._price_force_live = False
+        _need_fetch.append(_ticker)
+
+if _need_fetch or _force_live:
+    _fetched = refresh_tracked_prices(
+        list(holdings.keys()) if _force_live else _need_fetch,
+        force_live=_force_live,
+    )
+    prices.update(_fetched)
+    _price_snapshot = _ensure_last_prices_snapshot()
+
+total_market_value = sum(h["qty"] * prices.get(t, 0.0) for t, h in holdings.items())
+total_cost_basis = sum(h["cost_basis"] for h in holdings.values())
+overall_return = ((total_market_value / total_cost_basis) - 1) * 100 if total_cost_basis > 0 else 0.0
+total_current_cash = sum(m.get("total_contributed", 0.0) - m.get("total_invested", 0.0) for m in data.get("members", []))
 
 # ====================== LAYOUT: BIBLE + PORTFOLIO SUMMARY ======================
 col_bible, col_summary = st.columns([3, 1])
@@ -1341,14 +1475,33 @@ with col_bible:
     """, unsafe_allow_html=True)
 
 with col_summary:
-    st.markdown(f"""
-    <div class="portfolio-summary">
-        <strong>Portfolio Summary</strong><br><br>
-        <span style="font-size: 1.15em;">Portfolio Value: <strong>${total_market_value:,.0f}</strong></span><br>
-        <span style="font-size: 1.15em;">Portfolio Return: <strong>{overall_return:+.2f}%</strong></span><br>
-        <span style="font-size: 0.95em; opacity: 0.85;">Current Cash Balance: ${total_current_cash:,.0f}</span>
-    </div>
-    """, unsafe_allow_html=True)
+    _nav_interval = _live_price_interval()
+
+    def _render_portfolio_nav(price_map=None):
+        live_map = price_map if price_map is not None else refresh_tracked_prices(
+            list(holdings.keys()),
+            force_live=get_market_session() == "open",
+        )
+        nav = sum(h["qty"] * live_map.get(t, 0.0) for t, h in holdings.items())
+        cost = sum(h["cost_basis"] for h in holdings.values())
+        ret = ((nav / cost) - 1) * 100 if cost > 0 else 0.0
+        cash = total_current_cash
+        st.markdown(f"""
+        <div class="portfolio-summary">
+            <strong>Portfolio Summary</strong><br><br>
+            <span style="font-size: 1.15em;">Portfolio Value: <strong>${nav:,.0f}</strong></span><br>
+            <span style="font-size: 1.15em;">Portfolio Return: <strong>{ret:+.2f}%</strong></span><br>
+            <span style="font-size: 0.95em; opacity: 0.85;">Current Cash Balance: ${cash:,.0f}</span>
+        </div>
+        """, unsafe_allow_html=True)
+
+    if hasattr(st, "fragment"):
+        @st.fragment(run_every=_nav_interval)
+        def _live_nav_fragment():
+            _render_portfolio_nav()
+        _live_nav_fragment()
+    else:
+        _render_portfolio_nav(prices)
 
 # ====================== NEGATIVE BALANCE ALERT ======================
 negative_members = [m["name"] for m in data.get("members", [])
@@ -1473,7 +1626,7 @@ if st.session_state.is_admin:
             st.info("No access events yet. Events are recorded on login.")
 
 # ====================== TABS ======================
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs([
     "👥 Member Cash Balances",
     "📊 Club Holdings (Live)",
     "📈 Member Performance",
@@ -1482,7 +1635,8 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
     "📉 Advanced Technical Analysis + Confluence",
     "📅 Meeting Scheduler",
     "🤖 AI Trading Agents",
-    "🧠 EFA Multi-Agent System"
+    "🧠 EFA Multi-Agent System",
+    "📄 Stock Assessment + Kelly",
 ])
 
 df_members = pd.DataFrame(data["members"])
@@ -1602,74 +1756,56 @@ with tab2:
     else:
         st.info(status)
 
-    # ====================== FORCE PRICE REFRESH (kept as requested) ======================
     col_refresh1, col_refresh2 = st.columns([1, 3])
     with col_refresh1:
-        if st.button("🔄 Force Refresh Live Prices", type="primary", use_container_width=True, 
-                     help="Clears Streamlit + Supabase price cache and forces fresh Yahoo/Finnhub API calls. Use after deploy or when prices look stale."):
-            if "price_refresh_token" not in st.session_state:
-                st.session_state.price_refresh_token = 0
-            st.session_state.price_refresh_token += 1
-            st.session_state._price_force_live = True
-            st.session_state._last_prices_snapshot_dirty = True
-            try:
-                get_price.clear()
-            except Exception:
-                pass
+        if st.button("🔄 Force Refresh Live Prices", type="primary", use_container_width=True,
+                     help="Clears caches and forces a fresh Yahoo/Finnhub pull. Quotes also auto-refresh while the market is open."):
+            _bump_price_generation()
             clear_price_cache(get_all_tracked_tickers())
             _invalidate_last_prices_snapshot()
             try:
                 get_fundamentals.clear()
             except Exception:
                 pass
-            st.success("Cache cleared (Streamlit + Supabase) — fetching fresh prices...")
+            st.success("Cache cleared — fetching fresh last prints / live quotes...")
             st.rerun()
-    # === Holdings Table with price source diagnostics ===
-    rows = []
-    total_qty = total_cost = total_market = total_unrealized = 0.0
-    for ticker, h in holdings.items():
-        qty = h["qty"]
-        cost_basis = h["cost_basis"]
-        avg_price = cost_basis / qty if qty > 0 else 0
+    with col_refresh2:
+        if get_market_session() == "open":
+            st.caption("Live quotes auto-refresh every 60 seconds during US market hours. Force Refresh is only needed if a quote looks stuck.")
+        else:
+            st.caption(
+                f"Market closed — showing the last available print "
+                f"({get_last_trading_day_str()} regular close). Auto-refresh resumes at 9:30 ET."
+            )
 
-        live_price = prices.get(ticker, 0.0)
-        _, price_source = get_price_with_source(ticker, price=live_price)
+    _holdings_interval = _live_price_interval()
 
-        market_value = qty * live_price
-        unrealized = market_value - cost_basis
-        pct_return = ((market_value / cost_basis) - 1) * 100 if cost_basis > 0 else 0
-        rows.append({
-            "Ticker": ticker,
-            "Quantity": round(qty, 4),
-            "Avg Purchase Price": f"${avg_price:,.4f}",
-            "Cost Basis": f"${cost_basis:,.2f}",
-            "Live Price": f"${live_price:,.2f}",
-            "Price Source": price_source,
-            "Market Value": f"${market_value:,.2f}",
-            "Unrealized Gain/Loss": f"${unrealized:,.2f}",
-            "% Return": f"{pct_return:.2f}%"
-        })
-        total_qty += qty
-        total_cost += cost_basis
-        total_market += market_value
-        total_unrealized += unrealized
+    def _render_holdings_live_table():
+        session = get_market_session()
+        live_map = refresh_tracked_prices(
+            list(holdings.keys()),
+            force_live=(session == "open"),
+        )
+        rows, total_market = _holdings_rows_from_prices(live_map)
+        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+        if total_market == 0:
+            st.warning(
+                "⚠️ Prices showing $0.00. Yahoo/Finnhub did not return a last print yet and there is no cached quote. "
+                "Try Force Refresh once; after hours we use the last regular-session print, not $0."
+            )
+        try:
+            et_now = datetime.now(pytz.timezone("US/Eastern")).strftime("%H:%M:%S ET")
+        except Exception:
+            et_now = datetime.now().strftime("%H:%M:%S")
+        st.caption(f"Quotes as of {et_now}")
 
-    total_pct_return = ((total_market / total_cost) - 1) * 100 if total_cost > 0 else 0
-    rows.append({
-        "Ticker": "**TOTAL**",
-        "Quantity": round(total_qty, 4),
-        "Avg Purchase Price": "—",
-        "Cost Basis": f"${total_cost:,.2f}",
-        "Live Price": "—",
-        "Price Source": "—",
-        "Market Value": f"${total_market:,.2f}",
-        "Unrealized Gain/Loss": f"${total_unrealized:,.2f}",
-        "% Return": f"{total_pct_return:.2f}%"
-    })
-    st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
-
-    if total_market == 0:
-        st.warning("⚠️ Prices showing $0.00. This usually means we have no yfinance data and no prior cached price for these tickers. Try Force Refresh. After hours / closed market we intentionally use the final daily (EOD) close.")
+    if hasattr(st, "fragment"):
+        @st.fragment(run_every=_holdings_interval)
+        def _live_holdings_fragment():
+            _render_holdings_live_table()
+        _live_holdings_fragment()
+    else:
+        _render_holdings_live_table()
 
     # ====================== PORTFOLIO PERFORMANCE HISTORY (REAL DATA) ======================
     st.subheader("📈 Portfolio Performance History")
@@ -3190,22 +3326,15 @@ with tab9:
         if st.button("🔄 Refresh Price Cache (used by Holdings)", type="secondary"):
             with st.spinner("Clearing price caches and pre-warming..."):
                 st.session_state._price_force_live = True
-                if "price_refresh_token" not in st.session_state:
-                    st.session_state.price_refresh_token = 0
-                st.session_state.price_refresh_token += 1
-                try:
-                    get_price.clear()
-                except Exception:
-                    pass
+                _bump_price_generation()
                 portfolio_holdings = st.session_state.get("portfolio_holdings") or list(holdings.keys())
                 watchlist = st.session_state.get("watchlist", [])
                 all_tickers = list(set(portfolio_holdings + watchlist))
-                _token = st.session_state.get("price_refresh_token")
 
                 warmed = 0
                 for t in all_tickers:
                     try:
-                        p = get_price(t, _refresh_token=_token, _force_live=True)
+                        p = get_price(t, refresh_generation=_price_generation(), force_live=True)
                         if p > 0:
                             warmed += 1
                     except Exception as e:
@@ -3270,3 +3399,18 @@ with tab9:
         st.markdown(AGENT_FIELD_DEFINITIONS)
 
     st.caption("v1.1 • Latest analysis only shown (history kept in Supabase) • Live prices + daily-history indicators")
+
+# TAB 10: Stock assessment template + half-Kelly matrix (local review, not a prod push)
+with tab10:
+    portfolio_tickers = st.session_state.get("portfolio_holdings") or [
+        ticker for ticker in holdings.keys() if ticker != "CASH"
+    ]
+    watchlist_tickers = st.session_state.get("watchlist", [])
+    render_stock_assessment_tab(
+        grok_client=client,
+        get_fundamentals=get_fundamentals,
+        portfolio_tickers=portfolio_tickers,
+        watchlist_tickers=watchlist_tickers,
+        analyst_name=st.session_state.get("username") or "EFA member",
+        finnhub_client=FINNHUB_CLIENT,
+    )

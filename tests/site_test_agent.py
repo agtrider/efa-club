@@ -69,6 +69,9 @@ def test_syntax():
         ROOT / "efa_club_persistence.py",
         ROOT / "efa_club_auth.py",
         ROOT / "efa_club_meetings.py",
+        ROOT / "efa_club_kelly.py",
+        ROOT / "efa_club_research.py",
+        ROOT / "efa_club_logos.py",
         ROOT / "efa-trading-agent" / "agents" / "research.py",
         ROOT / "efa-trading-agent" / "agents" / "orchestrator.py",
     ]
@@ -383,14 +386,43 @@ def test_validate_data_sources():
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
+def test_kelly_matrix():
+    from efa_club_kelly import build_half_kelly_matrix, find_kelly_workbook, half_kelly_fraction
+    from efa_club_research import build_assessment_prompt, build_printable_report
+
+    if abs(half_kelly_fraction(0.55, 1.0) - 0.05) > 1e-9:
+        return TestResult("kelly_matrix").fail("p=0.55, b=1 half-Kelly should be 5%")
+    matrix = build_half_kelly_matrix()
+    if len(matrix.get("stake_rows") or []) != 36:
+        return TestResult("kelly_matrix").fail(f"expected 36 stake rows, got {len(matrix.get('stake_rows') or [])}")
+    if find_kelly_workbook() is None:
+        return TestResult("kelly_matrix").fail("EFA - Kelly Formula.xlsx not found")
+    prompt = build_assessment_prompt("Test Co", "FSLR")
+    if "Do NOT invent a Kelly formula" not in prompt:
+        return TestResult("kelly_matrix").fail("assessment prompt missing Kelly handoff")
+    html = build_printable_report(
+        {
+            "ticker": "FSLR",
+            "company": "First Solar",
+            "parsed": {"narrative_markdown": "Test memo", "recommendation": "Hold", "ticker": "FSLR"},
+        },
+        matrix,
+    )
+    if "Half-Kelly" not in html or "Grok assessment" not in html:
+        return TestResult("kelly_matrix").fail("printable report missing writeup or Kelly side")
+    return TestResult("kelly_matrix").ok("workbook found, 36-cell matrix, printable report")
+
+
 def test_module_imports():
     import efa_club_persistence
     import efa_club_auth
     import efa_club_meetings
+    import efa_club_kelly
+    import efa_club_research
     from efa_club_auth import verify_password, is_admin
     assert verify_password("Chris Koo", "EFAIC2026002KC")
     assert not is_admin("Chris Koo")
-    return TestResult("module_imports").ok("persistence, auth, meetings modules OK")
+    return TestResult("module_imports").ok("persistence, auth, meetings, kelly, research modules OK")
 
 
 ALL_TESTS = [
@@ -409,6 +441,7 @@ ALL_TESTS = [
     test_meeting_notes_permissions,
     test_meeting_vote_rules,
     test_orchestrator_cycle,
+    test_kelly_matrix,
 ]
 
 

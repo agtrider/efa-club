@@ -502,7 +502,8 @@ def fundamentals_row_has_extended_data(row):
     return any(row.get(c) not in (None, "", "N/A") for c in extended_cols)
 
 
-PRICE_INTRADAY_TTL_MINUTES = 15
+# During RTH, cached intraday quotes older than this are refetched automatically.
+PRICE_INTRADAY_TTL_MINUTES = 1
 
 
 def parse_price_meta_timestamp(ts_str):
@@ -565,22 +566,30 @@ def delete_transaction_at(transactions, index):
 
 def cache_fresh_enough(meta, session, *, force_live=False, intraday_ttl_minutes=PRICE_INTRADAY_TTL_MINUTES,
                        today=None, target_eod=None, prior_eod=None):
-    """True when live API can be skipped for this cached entry."""
+    """True when live API can be skipped for this cached entry.
+
+    Open market: only a *today* intraday quote within the TTL is fresh.
+    Closed market: only a last-print / EOD quote for the last trading day is fresh.
+    Yesterday's close is shown as a fallback value, but it is not treated as fresh.
+    """
     if force_live:
         return False
     if acceptable_cached_price(meta, session, today=today, target_eod=target_eod, prior_eod=prior_eod) <= 0:
         return False
 
     src = str(meta.get("source", "")).lower()
+    as_of = str(meta.get("as_of", "") or "")
     updated = parse_price_meta_timestamp(meta.get("timestamp", ""))
 
-    if session == "open" and src == "intraday":
+    if session == "open":
+        if src != "intraday" or as_of != today:
+            return False
         if updated is None:
-            return True
+            return False
         age_min = (datetime.now() - updated).total_seconds() / 60.0
         return age_min <= intraday_ttl_minutes
 
-    return True
+    return as_of == target_eod and src in ("eod_close", "last_print", "intraday")
 
 
 def _probe_fields(data, fields):

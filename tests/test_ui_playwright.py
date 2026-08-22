@@ -72,6 +72,14 @@ def test_tab6_fundamentals_section_loads(logged_in_app):
     )
 
 
+def test_stock_assessment_tab_loads(logged_in_app):
+    at = logged_in_app
+    tab = next((t for t in at.tabs if "Stock Assessment" in t.label), None)
+    assert tab is not None, f"stock assessment tab missing; tabs={[t.label for t in at.tabs]}"
+    markdown_text = " ".join(m.value for m in at.markdown if m.value)
+    assert "Half-Kelly" in markdown_text or "Kelly" in markdown_text
+
+
 def test_scheduler_tab_loads(logged_in_app):
     at = logged_in_app
     scheduler = next((t for t in at.tabs if "Meeting Scheduler" in t.label), None)

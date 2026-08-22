@@ -259,6 +259,53 @@ def save_grok_analyses(analyses):
     return save_to_supabase("grok_analyses", analyses)
 
 
+def load_stock_assessments():
+    """Local-first so new research drafts survive without a Git/prod push."""
+    local = load_json("stock_assessments.json", [])
+    if not isinstance(local, list):
+        local = []
+    supa = load_from_supabase("stock_assessments", None)
+    if isinstance(supa, list) and len(supa) > len(local):
+        return supa
+    return local
+
+
+def save_stock_assessments(assessments):
+    drop = {"report_html", "report_markdown"}
+    payload = []
+    for item in assessments or []:
+        if not isinstance(item, dict):
+            continue
+        payload.append({k: v for k, v in item.items() if k not in drop})
+    local_ok = save_json("stock_assessments.json", payload)
+    if supabase is None:
+        return local_ok
+    return save_to_supabase("stock_assessments", payload) or local_ok
+
+
+def load_logos_analyses():
+    local = load_json("logos_analyses.json", [])
+    if not isinstance(local, list):
+        local = []
+    supa = load_from_supabase("logos_analyses", None)
+    if isinstance(supa, list) and len(supa) > len(local):
+        return supa
+    return local
+
+
+def save_logos_analyses(analyses):
+    drop = {"report_html", "report_markdown", "report_pdf"}
+    payload = []
+    for item in analyses or []:
+        if not isinstance(item, dict):
+            continue
+        payload.append({k: v for k, v in item.items() if k not in drop})
+    local_ok = save_json("logos_analyses.json", payload)
+    if supabase is None:
+        return local_ok
+    return save_to_supabase("logos_analyses", payload) or local_ok
+
+
 def load_member_sessions():
     return load_from_supabase("member_sessions", {})
 

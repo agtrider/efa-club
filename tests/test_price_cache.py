@@ -46,7 +46,7 @@ def test_acceptable_cached_price_eod_after_close():
 
 
 def test_cache_fresh_enough_intraday_within_ttl():
-    recent = (datetime.now() - timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M")
+    recent = datetime.now().strftime("%Y-%m-%d %H:%M")
     meta = {
         "price": 270.0,
         "source": "intraday",
@@ -56,6 +56,42 @@ def test_cache_fresh_enough_intraday_within_ttl():
     assert cache_fresh_enough(
         meta,
         "open",
+        force_live=False,
+        today="2026-06-24",
+        target_eod="2026-06-24",
+        prior_eod="2026-06-23",
+    )
+
+
+def test_cache_fresh_enough_eod_during_open_is_stale():
+    """Yesterday's close must not block a live fetch while the market is open."""
+    meta = {
+        "price": 265.0,
+        "source": "eod_close",
+        "as_of": "2026-06-23",
+        "timestamp": "2026-06-23 16:05",
+    }
+    assert not cache_fresh_enough(
+        meta,
+        "open",
+        force_live=False,
+        today="2026-06-24",
+        target_eod="2026-06-23",
+        prior_eod="2026-06-20",
+    )
+
+
+def test_cache_fresh_enough_afterhours_prior_day_is_stale():
+    """After the bell, a prior-day cache should auto-refresh to today's last print."""
+    meta = {
+        "price": 265.0,
+        "source": "eod_close",
+        "as_of": "2026-06-23",
+        "timestamp": "2026-06-23 16:05",
+    }
+    assert not cache_fresh_enough(
+        meta,
+        "afterhours",
         force_live=False,
         today="2026-06-24",
         target_eod="2026-06-24",
